@@ -1,17 +1,20 @@
 """
 Market Intelligence Hub — Streamlit Cloud App
-All 7 sections, dark theme, sidebar navigation, cached data loading.
+Full subsection structure: 7 sections × multiple tabs, dark theme, sidebar navigation.
 """
+from __future__ import annotations
 
-import streamlit as st
-import pandas as pd
+import json
+import math
+import os
+from datetime import datetime, timedelta
+from pathlib import Path
+
 import numpy as np
+import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-import json
-import os
-from pathlib import Path
-from datetime import datetime, timedelta
+import streamlit as st
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -27,8 +30,8 @@ DATA_ROOT = Path(__file__).parent / "data"
 C_GREEN  = "#22c55e"
 C_YELLOW = "#eab308"
 C_RED    = "#ef4444"
-C_BLUE   = "#4f8ef7"
-C_GREY   = "#9ca3af"
+C_BLUE   = "#3b82f6"
+C_GREY   = "#6b7280"
 C_BG     = "#0f1117"
 C_CARD   = "#1a1f2e"
 
@@ -42,1256 +45,2114 @@ PLOTLY_BASE = dict(
     hoverlabel=dict(bgcolor=C_CARD, font_color="#ffffff"),
 )
 
-HORIZON_MAP = {
-    "short":  "3-Day",
-    "medium": "10-Day",
-    "long":   "40-Day",
+ASSETS = ["SPY", "QQQ", "GC=F", "BTC-USD"]
+ASSET_LABELS = {"SPY": "SPY", "QQQ": "QQQ", "GC=F": "Gold", "BTC-USD": "Bitcoin"}
+ASSET_SUBTEXT = {"SPY": "S&P 500", "QQQ": "Nasdaq 100", "GC=F": "Gold Futures", "BTC-USD": "BTC/USD"}
+
+HORIZONS = [
+    ("short",  "3-day",  "3-Day"),
+    ("medium", "10-day", "10-Day"),
+    ("long",   "40-day", "40-Day"),
+]
+HORIZON_LABEL = {"short": "3-Day", "medium": "10-Day", "long": "40-Day"}
+
+DIRECTION_COLOR = {"LONG": C_GREEN, "SHORT": C_RED, "NEUTRAL": C_GREY, "FLAT": C_GREY}
+DIRECTION_ICON  = {"LONG": "↑", "SHORT": "↓", "NEUTRAL": "↔", "FLAT": "↔"}
+
+MODEL_COLS = ["tft_pred", "lgb_pred", "xgb_pred", "ridge_pred", "rf_pred", "ensemble_pred"]
+MODEL_NAMES = {
+    "tft_pred": "TFT",
+    "lgb_pred": "LightGBM",
+    "xgb_pred": "XGBoost",
+    "ridge_pred": "Ridge",
+    "rf_pred": "RF",
+    "ensemble_pred": "Ensemble",
+}
+
+CONF_COLOR = {"HIGH": C_GREEN, "MED": C_YELLOW, "LOW": C_RED}
+CONF_BADGE = {"HIGH": "🟢 HIGH", "MED": "🟡 MED", "LOW": "🔴 LOW"}
+
+TIER_COLOR_MAP = {
+    "A+": C_GREEN,
+    "A":  "#16a34a",
+    "B":  C_YELLOW,
+    "C":  "#f97316",
+    "D":  C_RED,
 }
 
 SECTOR_ETF = {
-    "Energy":                  "XLE",
-    "Communication Services":  "XLC",
-    "Comm Services":           "XLC",
-    "Technology":              "XLK",
-    "Information Technology":  "XLK",
-    "Materials":               "XLB",
-    "Financials":              "XLF",
-    "Financial Services":      "XLF",
-    "Finance":                 "XLF",
-    "Health Care":             "XLV",
-    "Healthcare":              "XLV",
-    "Industrials":             "XLI",
-    "Consumer Discretionary":  "XLY",
-    "Consumer Staples":        "XLP",
-    "Utilities":               "XLU",
-    "Real Estate":             "XLRE",
+    "Energy": "XLE",
+    "Information Technology": "XLK",
+    "Technology": "XLK",
+    "Materials": "XLB",
+    "Financials": "XLF",
+    "Financial Services": "XLF",
+    "Health Care": "XLV",
+    "Industrials": "XLI",
+    "Consumer Discretionary": "XLY",
+    "Consumer Staples": "XLP",
+    "Utilities": "XLU",
+    "Real Estate": "XLRE",
+    "Communication Services": "XLC",
+    "Comm Services": "XLC",
 }
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+RRG_COLOR = {
+    "leading":   C_GREEN,
+    "improving": C_BLUE,
+    "weakening": C_YELLOW,
+    "lagging":   C_RED,
+}
+RRG_BADGE = {
+    "leading":   "🟢 Leading",
+    "improving": "🔵 Improving",
+    "weakening": "🟡 Weakening",
+    "lagging":   "🔴 Lagging",
+}
 
-def sig_color(sig: str) -> str:
-    s = str(sig).lower().strip()
-    return {
-        "green":  C_GREEN,
-        "yellow": C_YELLOW,
-        "red":    C_RED,
-        "long":   C_GREEN,
-        "short":  C_RED,
-        "flat":   C_GREY,
-        "neutral":C_GREY,
-    }.get(s, C_GREY)
-
-
-def badge_html(text: str, color: str, size: str = "0.8em") -> str:
-    return (
-        f'<span style="background:{color};color:#fff;padding:2px 9px;'
-        f'border-radius:4px;font-size:{size};font-weight:700;'
-        f'letter-spacing:0.03em">{text}</span>'
-    )
-
-
-def card_html(title: str, value: str, value_color: str = "#fff",
-              subtitle: str = "", border_color: str = C_BLUE) -> str:
-    return (
-        f'<div style="background:{C_CARD};border-left:4px solid {border_color};'
-        f'border-radius:8px;padding:14px 18px;margin:6px 0">'
-        f'<div style="color:{C_GREY};font-size:0.78em;text-transform:uppercase;'
-        f'letter-spacing:0.05em;margin-bottom:4px">{title}</div>'
-        f'<div style="color:{value_color};font-size:1.6em;font-weight:700;'
-        f'line-height:1.1">{value}</div>'
-        f'{"<div style=color:" + C_GREY + ";font-size:0.8em;margin-top:3px>" + subtitle + "</div>" if subtitle else ""}'
-        f'</div>'
-    )
+# ── CSS (dark theme overrides) ────────────────────────────────────────────────
+st.markdown("""
+<style>
+[data-testid="stSidebar"] { background-color: #0d1117; }
+[data-testid="stSidebar"] * { color: #e2e8f0 !important; }
+.stApp { background-color: #0f1117; }
+h1,h2,h3,h4,h5,h6 { color: #f1f5f9 !important; }
+p, li, span, div, label { color: #cbd5e1; }
+[data-testid="stMetricLabel"] { color: #94a3b8 !important; }
+[data-testid="stMetricValue"] { color: #f1f5f9 !important; }
+.block-container { padding-top: 1rem; }
+.stTabs [data-baseweb="tab-list"] { gap: 2px; }
+.stTabs [data-baseweb="tab"] { padding: 6px 14px; }
+</style>
+""", unsafe_allow_html=True)
 
 
-def score_color(score: float) -> str:
-    if score >= 7:   return C_GREEN
-    if score >= 4:   return C_YELLOW
-    return C_RED
-
-
-def regime_info(pct: float) -> tuple:
-    if pct >= 70:  return "Bull Market",  C_GREEN
-    if pct >= 50:  return "Mixed",         C_YELLOW
-    if pct >= 30:  return "Caution",       C_YELLOW
-    return "Bear Market", C_RED
-
-
-def add_rangeselector(fig, periods=None, default_range=None):
-    periods = periods or ["1M", "3M", "6M", "1Y", "All"]
-    buttons = []
-    for p in periods:
-        if p == "All":
-            buttons.append(dict(step="all", label="All"))
-        elif p.endswith("M"):
-            buttons.append(dict(count=int(p[:-1]), label=p, step="month", stepmode="backward"))
-        elif p.endswith("Y"):
-            buttons.append(dict(count=int(p[:-1]), label=p, step="year", stepmode="backward"))
-    fig.update_xaxes(
-        rangeselector=dict(
-            buttons=buttons,
-            bgcolor=C_CARD,
-            activecolor=C_BLUE,
-            font=dict(color="#fff"),
-        ),
-        rangeslider=dict(visible=False),
-        type="date",
-    )
-    if default_range:
-        fig.update_xaxes(range=default_range)
-    return fig
-
-
-def section_divider(text: str):
-    st.markdown(
-        f'<div style="border-bottom:1px solid #2d3748;padding-bottom:4px;'
-        f'margin:24px 0 16px;color:{C_GREY};font-size:0.8em;'
-        f'text-transform:uppercase;letter-spacing:0.08em">{text}</div>',
-        unsafe_allow_html=True,
-    )
-
-
-# ── Data loaders (all cached) ─────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# Data loaders
+# ══════════════════════════════════════════════════════════════════════════════
 
 @st.cache_data(ttl=3600)
 def load_ml_signals() -> pd.DataFrame:
     p = DATA_ROOT / "ml_signals" / "signal_log_meta.csv"
-    # Columns: date, asset, horizon, tft_pred, lgb_pred, xgb_pred,
-    #          ridge_pred, rf_pred, ensemble_pred, ensemble_direction,
-    #          vote_count, n_models, confidence, confidence_level
+    if not p.exists():
+        return pd.DataFrame()
     df = pd.read_csv(p, parse_dates=["date"])
-    df["horizon_label"] = df["horizon"].map(HORIZON_MAP).fillna(df["horizon"].str.title())
-    return df
-
-
-@st.cache_data(ttl=3600)
-def load_canslim() -> pd.DataFrame:
-    p = DATA_ROOT / "canslim" / "composite_rankings.csv"
-    # Columns: ticker, composite_score, tier, technical_score,
-    #          fundamental_score, pattern_score, market_score,
-    #          best_pattern, rs_rating, trend_template_pass,
-    #          squeeze_fired, price, sector
-    df = pd.read_csv(p)
-    return df
-
-
-@st.cache_data(ttl=3600)
-def load_breadth_index() -> pd.DataFrame:
-    p = DATA_ROOT / "breadth" / "breadth_index_weekly_with_wow.csv"
-    # Columns: date, above_50sma, above_200sma, new_52w_high, new_52w_low,
-    #          above_50sma_wow, above_200sma_wow, new_52w_high_wow, new_52w_low_wow
-    df = pd.read_csv(p, parse_dates=["date"])
-    df = df.sort_values("date").dropna(subset=["above_200sma"])
-    return df
-
-
-@st.cache_data(ttl=3600)
-def load_breadth_sector() -> pd.DataFrame:
-    p = DATA_ROOT / "breadth" / "breadth_sector_weekly.csv"
-    # Columns: date, sector, above_50sma, above_200sma, new_52w_high, new_52w_low
-    df = pd.read_csv(p, parse_dates=["date"])
-    df = df.sort_values(["sector", "date"])
-    return df
-
-
-@st.cache_data(ttl=3600)
-def load_risk_factors() -> list:
-    p = DATA_ROOT / "risk_factors" / "latest_scores.json"
-    with open(p) as f:
-        return json.load(f)
-
-
-@st.cache_data(ttl=3600)
-def load_risk_timeseries() -> pd.DataFrame:
-    p = DATA_ROOT / "risk_factors" / "composite_timeseries.parquet"
-    # Columns: date (datetime), composite_20, composite_50
-    df = pd.read_parquet(p)
-    df["date"] = pd.to_datetime(df["date"])
     return df.sort_values("date").reset_index(drop=True)
+
+
+@st.cache_data(ttl=3600)
+def load_canslim_rankings() -> pd.DataFrame:
+    p = DATA_ROOT / "canslim" / "composite_rankings.csv"
+    if not p.exists():
+        return pd.DataFrame()
+    df = pd.read_csv(p)
+    for col in ["trend_template_pass", "squeeze_fired"]:
+        if col in df.columns:
+            df[col] = df[col].astype(bool)
+    return df
+
+
+@st.cache_data(ttl=3600)
+def load_canslim_patterns() -> pd.DataFrame:
+    p = DATA_ROOT / "canslim" / "pattern_results.csv"
+    if not p.exists():
+        return pd.DataFrame()
+    return pd.read_csv(p)
+
+
+@st.cache_data(ttl=3600)
+def load_canslim_backtest() -> dict | None:
+    p = DATA_ROOT / "canslim" / "backtest_results.json"
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text())
+    except Exception:
+        return None
 
 
 @st.cache_data(ttl=3600)
 def load_crypto() -> pd.DataFrame:
     p = DATA_ROOT / "crypto" / "history.parquet"
-    # Columns: Rank, Symbol, Composite, RS Score, Tech Score, Fund Score,
-    #          RRG Regime, RS %ile, RS Momentum, RS Breakout,
-    #          Golden ✕, Death ✕, run_date, run_ts, Tier
-    df = pd.read_parquet(p)
-    df["run_date"] = pd.to_datetime(df["run_date"])
-    latest = df["run_date"].max()
-    return df[df["run_date"] == latest].copy().sort_values("Rank")
+    if not p.exists():
+        return pd.DataFrame()
+    try:
+        df = pd.read_parquet(p)
+        if "run_date" in df.columns:
+            df["run_date"] = pd.to_datetime(df["run_date"], errors="coerce")
+        return df
+    except Exception:
+        return pd.DataFrame()
 
 
-# ── Section 1: Overview ───────────────────────────────────────────────────────
+@st.cache_data(ttl=3600)
+def load_breadth_index() -> pd.DataFrame:
+    p = DATA_ROOT / "breadth" / "breadth_index_weekly_with_wow.csv"
+    if not p.exists():
+        return pd.DataFrame()
+    return pd.read_csv(p, parse_dates=["date"]).sort_values("date").reset_index(drop=True)
 
-def render_overview():
-    st.title("📊 Market Intelligence Hub")
-    st.markdown("Real-time dashboard status — all modules at a glance")
+
+@st.cache_data(ttl=3600)
+def load_breadth_sector() -> pd.DataFrame:
+    p = DATA_ROOT / "breadth" / "breadth_sector_weekly.csv"
+    if not p.exists():
+        return pd.DataFrame()
+    return pd.read_csv(p, parse_dates=["date"]).sort_values(["date", "sector"]).reset_index(drop=True)
+
+
+@st.cache_data(ttl=3600)
+def load_risk_scores() -> list[dict]:
+    p = DATA_ROOT / "risk_factors" / "latest_scores.json"
+    if not p.exists():
+        return []
+    try:
+        return json.loads(p.read_text())
+    except Exception:
+        return []
+
+
+@st.cache_data(ttl=3600)
+def load_risk_timeseries() -> pd.DataFrame:
+    p = DATA_ROOT / "risk_factors" / "composite_timeseries.parquet"
+    if not p.exists():
+        return pd.DataFrame()
+    try:
+        df = pd.read_parquet(p)
+        if "date" in df.columns:
+            df["date"] = pd.to_datetime(df["date"], errors="coerce")
+            df = df.sort_values("date").reset_index(drop=True)
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+
+def _file_mtime(path: Path) -> str:
+    if path.exists():
+        return datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+    return "—"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Utility helpers
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _dir_badge(direction: str, size: str = "0.85rem") -> str:
+    col = DIRECTION_COLOR.get(str(direction).upper(), C_GREY)
+    icon = DIRECTION_ICON.get(str(direction).upper(), "?")
+    return (
+        f"<span style='background:{col};color:#fff;padding:2px 10px;"
+        f"border-radius:10px;font-weight:700;font-size:{size};'>"
+        f"{icon} {direction}</span>"
+    )
+
+
+def _conf_badge(level: str) -> str:
+    col = CONF_COLOR.get(str(level).upper(), C_GREY)
+    return (
+        f"<span style='background:{col}22;color:{col};border:1px solid {col}66;"
+        f"padding:2px 8px;border-radius:6px;font-weight:700;font-size:0.78rem;'>"
+        f"{CONF_BADGE.get(str(level).upper(), level)}</span>"
+    )
+
+
+def _tier_badge(tier: str) -> str:
+    col = TIER_COLOR_MAP.get(tier, C_GREY)
+    return (
+        f"<span style='background:{col}33;color:{col};border:1px solid {col}88;"
+        f"padding:2px 10px;border-radius:6px;font-weight:700;font-size:0.82rem;'>{tier}</span>"
+    )
+
+
+def _rrg_badge(regime: str) -> str:
+    col = RRG_COLOR.get(str(regime).lower(), C_GREY)
+    label = RRG_BADGE.get(str(regime).lower(), regime)
+    return (
+        f"<span style='background:{col}22;color:{col};border:1px solid {col}66;"
+        f"padding:2px 8px;border-radius:6px;font-weight:700;font-size:0.82rem;'>{label}</span>"
+    )
+
+
+def _pred_arrow(val) -> str:
+    try:
+        v = float(val)
+    except (TypeError, ValueError):
+        return "—"
+    if v > 0:
+        return f"<span style='color:{C_GREEN};font-weight:700;'>↑ {v:+.2f}</span>"
+    elif v < 0:
+        return f"<span style='color:{C_RED};font-weight:700;'>↓ {v:+.2f}</span>"
+    return f"<span style='color:{C_GREY};'>→ {v:.2f}</span>"
+
+
+def _rangeselector() -> dict:
+    return dict(
+        buttons=[
+            dict(count=1,  label="1M",  step="month", stepmode="backward"),
+            dict(count=3,  label="3M",  step="month", stepmode="backward"),
+            dict(count=6,  label="6M",  step="month", stepmode="backward"),
+            dict(count=1,  label="1Y",  step="year",  stepmode="backward"),
+            dict(step="all", label="All"),
+        ]
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SIDEBAR NAVIGATION
+# ══════════════════════════════════════════════════════════════════════════════
+
+with st.sidebar:
+    st.markdown("## 📊 Market Hub")
     st.markdown("---")
+    section = st.radio(
+        "Navigate",
+        options=[
+            "🏠 Overview",
+            "🤖 ML Signals",
+            "📈 CAN SLIM",
+            "🪙 Crypto",
+            "📊 S&P Breadth",
+            "⚠️ Risk Factors",
+            "💰 Smart Money",
+        ],
+        label_visibility="collapsed",
+    )
+    st.markdown("---")
+    st.caption(f"Updated: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
 
-    panels = [
-        {
-            "name": "ML Signals",
-            "icon": "🤖",
-            "loader": load_ml_signals,
-            "metric": lambda df: (
-                f"{len(df['asset'].unique())} assets tracked",
-                df["date"].max().strftime("%Y-%m-%d"),
-                C_BLUE,
-            ),
-        },
-        {
-            "name": "CAN SLIM / SEPA",
-            "icon": "📈",
-            "loader": load_canslim,
-            "metric": lambda df: (
-                f"{(df['composite_score'] >= 80).sum()} A/A+ setups",
-                f"{len(df)} stocks screened",
-                C_GREEN,
-            ),
-        },
-        {
-            "name": "Crypto",
-            "icon": "🪙",
-            "loader": load_crypto,
-            "metric": lambda df: (
-                f"#{int(df.iloc[0]['Rank'])} {df.iloc[0]['Symbol']}",
-                df["run_date"].iloc[0].strftime("%Y-%m-%d"),
-                C_YELLOW,
-            ),
-        },
-        {
-            "name": "S&P 500 Breadth",
-            "icon": "🌊",
-            "loader": load_breadth_index,
-            "metric": lambda df: (
-                f"{df.iloc[-1]['above_200sma']:.1f}% >200 SMA",
-                df.iloc[-1]["date"].strftime("%Y-%m-%d"),
-                score_color(df.iloc[-1]["above_200sma"] / 10),
-            ),
-        },
-        {
-            "name": "Market Risk Factors",
-            "icon": "⚠️",
-            "loader": load_risk_factors,
-            "metric": lambda factors: (
-                f"{sum(1 for f in factors if f.get('signal') == 'green')} green / "
-                f"{sum(1 for f in factors if f.get('signal') == 'red')} red",
-                "15 macro factors",
-                C_GREEN if sum(1 for f in factors if f.get('signal') == 'green') >= 8 else C_YELLOW,
-            ),
-        },
-        {
-            "name": "Smart Money",
-            "icon": "💰",
-            "loader": None,
-            "metric": None,
-        },
-        {
-            "name": "ML Risk Timeseries",
-            "icon": "📉",
-            "loader": load_risk_timeseries,
-            "metric": lambda df: (
-                f"20d: {df.iloc[-1]['composite_20']:.2f} | 50d: {df.iloc[-1]['composite_50']:.2f}",
-                df.iloc[-1]["date"].strftime("%Y-%m-%d"),
-                score_color(df.iloc[-1]["composite_20"]),
-            ),
-        },
-    ]
+
+# ══════════════════════════════════════════════════════════════════════════════
+# OVERVIEW SECTION
+# ══════════════════════════════════════════════════════════════════════════════
+
+if section == "🏠 Overview":
+    st.title("📊 Market Intelligence Hub")
+    st.caption("Unified dashboard — ML signals · CAN SLIM · Crypto · Breadth · Risk · Smart Money")
+    st.markdown("---")
 
     cols = st.columns(3)
-    for i, panel in enumerate(panels[:6]):
-        with cols[i % 3]:
-            try:
-                if panel["loader"] is None:
-                    smart_dir = DATA_ROOT / "smart_money"
-                    files = list(smart_dir.glob("*")) if smart_dir.exists() else []
-                    status = f"{len(files)} files" if files else "Pipeline scheduled"
-                    st.markdown(
-                        card_html(f"{panel['icon']} {panel['name']}", status,
-                                  C_GREY, "Data loads on next run", C_GREY),
-                        unsafe_allow_html=True,
-                    )
-                else:
-                    data = panel["loader"]()
-                    value, subtitle, color = panel["metric"](data)
-                    st.markdown(
-                        card_html(f"{panel['icon']} {panel['name']}", value,
-                                  color, subtitle, color),
-                        unsafe_allow_html=True,
-                    )
-            except Exception as e:
-                st.markdown(
-                    card_html(f"{panel['icon']} {panel['name']}",
-                              "No data", C_RED, str(e)[:60], C_RED),
-                    unsafe_allow_html=True,
-                )
+
+    # ML Signals card
+    with cols[0]:
+        try:
+            ml = load_ml_signals()
+            if not ml.empty:
+                latest_date = ml["date"].max().strftime("%Y-%m-%d")
+                n_long = int((ml.groupby(["asset","horizon"]).last().reset_index()["ensemble_direction"] == "LONG").sum())
+                st.metric("🤖 ML Signals", f"{n_long}/12 LONG", delta=f"As of {latest_date}")
+            else:
+                st.metric("🤖 ML Signals", "No data")
+        except Exception as e:
+            st.metric("🤖 ML Signals", "Error")
+
+    # CAN SLIM card
+    with cols[1]:
+        try:
+            cs = load_canslim_rankings()
+            if not cs.empty:
+                n_elite = int((cs["composite_score"].fillna(0) >= 80).sum())
+                last_run = _file_mtime(DATA_ROOT / "canslim" / "composite_rankings.csv")
+                st.metric("📈 CAN SLIM", f"{n_elite} A/A+ setups", delta=last_run)
+            else:
+                st.metric("📈 CAN SLIM", "No data")
+        except Exception:
+            st.metric("📈 CAN SLIM", "Error")
+
+    # Crypto card
+    with cols[2]:
+        try:
+            cr = load_crypto()
+            if not cr.empty:
+                latest_rd = cr["run_date"].max()
+                cr_latest = cr[cr["run_date"] == latest_rd]
+                top = cr_latest.sort_values("Composite", ascending=False).iloc[0]
+                sym = str(top.get("Symbol", "?")).replace("/USDT","")
+                st.metric("🪙 Crypto", f"#{1} {sym}", delta=f"Composite {top['Composite']:.1f}")
+            else:
+                st.metric("🪙 Crypto", "No data")
+        except Exception:
+            st.metric("🪙 Crypto", "Error")
+
+    cols2 = st.columns(3)
+
+    # Breadth card
+    with cols2[0]:
+        try:
+            brd = load_breadth_index()
+            if not brd.empty:
+                latest_row = brd.iloc[-1]
+                pct200 = float(latest_row.get("above_200sma", 0))
+                regime = "🟢 BULL" if pct200 > 70 else ("🟡 MIXED" if pct200 > 50 else ("🟠 CAUTION" if pct200 > 30 else "🔴 BEAR"))
+                st.metric("📊 S&P Breadth", regime, delta=f"{pct200:.1f}% >200SMA")
+            else:
+                st.metric("📊 S&P Breadth", "No data")
+        except Exception:
+            st.metric("📊 S&P Breadth", "Error")
+
+    # Risk card
+    with cols2[1]:
+        try:
+            scores = load_risk_scores()
+            if scores:
+                green = sum(1 for s in scores if s.get("signal") == "green")
+                red   = sum(1 for s in scores if s.get("signal") == "red")
+                total = len(scores)
+                label = "🟢 LOW" if green >= total * 0.6 else ("🔴 HIGH" if red >= total * 0.6 else "🟡 MIXED")
+                st.metric("⚠️ Risk Factors", f"{label}", delta=f"{green}G / {red}R of {total}")
+            else:
+                st.metric("⚠️ Risk Factors", "No data")
+        except Exception:
+            st.metric("⚠️ Risk Factors", "Error")
+
+    # Smart Money card
+    with cols2[2]:
+        st.metric("💰 Smart Money", "Scheduled", delta="Next daily run")
 
     st.markdown("---")
-    st.markdown(
-        f'<div style="color:{C_GREY};font-size:0.8em">Last refreshed: '
-        f'{datetime.now().strftime("%Y-%m-%d %H:%M")} — '
-        f'Data cached 1 hour (ttl=3600)</div>',
-        unsafe_allow_html=True,
-    )
+    st.subheader("Data Status")
+    status_data = [
+        ("ML Signals",  DATA_ROOT / "ml_signals" / "signal_log_meta.csv"),
+        ("CAN SLIM",    DATA_ROOT / "canslim" / "composite_rankings.csv"),
+        ("Crypto",      DATA_ROOT / "crypto" / "history.parquet"),
+        ("Breadth",     DATA_ROOT / "breadth" / "breadth_index_weekly_with_wow.csv"),
+        ("Risk Factors",DATA_ROOT / "risk_factors" / "latest_scores.json"),
+    ]
+    stat_df = pd.DataFrame([
+        {"Source": name, "File": p.name, "Last Updated": _file_mtime(p), "Exists": "✅" if p.exists() else "❌"}
+        for name, p in status_data
+    ])
+    st.dataframe(stat_df, use_container_width=True, hide_index=True)
 
 
-# ── Section 2: ML Signals ─────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# ML SIGNALS SECTION
+# ══════════════════════════════════════════════════════════════════════════════
 
-def render_ml_signals():
-    st.title("🤖 ML Signal Engine")
-    st.markdown("Multi-model ensemble predictions: TFT · LightGBM · XGBoost · Ridge · Random Forest")
+elif section == "🤖 ML Signals":
+    st.title("🤖 ML Signals")
 
     try:
-        df = load_ml_signals()
+        meta_df = load_ml_signals()
     except Exception as e:
         st.error(f"Failed to load ML signals: {e}")
-        return
+        meta_df = pd.DataFrame()
 
-    # Latest signal per asset × horizon
-    latest = (
-        df.sort_values("date")
-        .groupby(["asset", "horizon"], as_index=False)
-        .last()
-    )
-    latest["horizon_label"] = latest["horizon"].map(HORIZON_MAP).fillna(latest["horizon"])
+    tabs = st.tabs([
+        "🎯 Signals",
+        "📊 Summary Table",
+        "📋 History",
+        "📈 P&L",
+        "🔄 Performance",
+        "🔭 Indicators",
+        "🤖 Models",
+        "🧩 Ensemble",
+        "📖 Overview",
+    ])
 
-    section_divider("Latest Signals — Asset × Horizon Grid")
+    # ── Tab 1: Signal Cards ────────────────────────────────────────────────
+    with tabs[0]:
+        try:
+            if meta_df.empty:
+                st.warning("No ML signal data found at data/ml_signals/signal_log_meta.csv")
+            else:
+                latest_date = meta_df["date"].max()
+                st.caption(f"Latest signals: **{latest_date.strftime('%Y-%m-%d')}** · {len(ASSETS)} assets × 3 horizons")
 
-    assets = sorted(latest["asset"].unique())
-    horizons = ["short", "medium", "long"]
-
-    # Grid of signal cards
-    asset_cols = st.columns(len(assets))
-    for col, asset in zip(asset_cols, assets):
-        with col:
-            st.markdown(f"**{asset}**", help="Asset tracked by the ML ensemble")
-            for h in horizons:
-                row = latest[(latest["asset"] == asset) & (latest["horizon"] == h)]
-                if row.empty:
-                    continue
-                r = row.iloc[0]
-                direction = str(r.get("ensemble_direction", "FLAT")).upper()
-                conf = float(r.get("confidence", 0))
-                conf_level = str(r.get("confidence_level", ""))
-                hlabel = HORIZON_MAP.get(h, h)
-                dc = sig_color(direction)
-                d_text = direction if direction != "FLAT" else "NEUTRAL"
-                st.markdown(
-                    f'<div style="background:{C_CARD};border-left:3px solid {dc};'
-                    f'padding:8px 10px;margin:4px 0;border-radius:5px">'
-                    f'<div style="color:{dc};font-weight:700;font-size:0.9em">{d_text}</div>'
-                    f'<div style="color:{C_GREY};font-size:0.75em">{hlabel}</div>'
-                    f'<div style="color:#fff;font-size:0.8em">'
-                    f'{conf:.0%} &nbsp;'
-                    f'<span style="color:{sig_color(conf_level.lower() if conf_level=="HIGH" else "yellow" if conf_level=="MED" else "red")}">'
-                    f'{conf_level}</span></div>'
-                    f'</div>',
-                    unsafe_allow_html=True,
+                # Get latest per asset+horizon
+                latest = (
+                    meta_df.sort_values("date")
+                    .groupby(["asset", "horizon"])
+                    .last()
+                    .reset_index()
                 )
 
-    section_divider("Summary Table — All Latest Signals")
+                for asset in ASSETS:
+                    label   = ASSET_LABELS.get(asset, asset)
+                    subtext = ASSET_SUBTEXT.get(asset, asset)
+                    st.markdown(f"### {label} <span style='color:{C_GREY};font-size:0.8rem'>({subtext})</span>", unsafe_allow_html=True)
 
-    disp = latest[["asset", "horizon_label", "ensemble_direction",
-                   "confidence_level", "confidence", "vote_count",
-                   "n_models", "date"]].copy()
-    disp.columns = ["Asset", "Horizon", "Direction", "Conf Level",
-                    "Confidence", "Votes", "Models", "Signal Date"]
-    disp["Confidence"] = disp["Confidence"].apply(lambda x: f"{x:.0%}")
-    disp["Signal Date"] = pd.to_datetime(disp["Signal Date"]).dt.strftime("%Y-%m-%d")
+                    hz_cols = st.columns(3)
+                    for col_idx, (hz_key, hz_day, hz_label) in enumerate(HORIZONS):
+                        row_mask = (latest["asset"] == asset) & (latest["horizon"] == hz_key)
+                        row_data = latest[row_mask]
 
-    def _dir_style(val):
-        v = str(val).upper()
-        if v == "LONG":   return f"color:{C_GREEN};font-weight:700"
-        if v == "SHORT":  return f"color:{C_RED};font-weight:700"
-        return f"color:{C_GREY}"
+                        with hz_cols[col_idx]:
+                            if row_data.empty:
+                                st.markdown(
+                                    f"<div style='background:{C_CARD};border-radius:8px;padding:12px;"
+                                    f"border:1px solid #2d3748;'>"
+                                    f"<div style='color:{C_GREY};font-size:0.8rem;'>{hz_label}</div>"
+                                    f"<div style='color:{C_GREY};'>No data</div></div>",
+                                    unsafe_allow_html=True,
+                                )
+                                continue
 
-    def _cl_style(val):
-        return {"HIGH": f"color:{C_GREEN}", "MED": f"color:{C_YELLOW}",
-                "LOW": f"color:{C_RED}"}.get(str(val), "")
+                            r = row_data.iloc[0]
+                            ens_dir  = str(r.get("ensemble_direction", "NEUTRAL")).upper()
+                            conf_lvl = str(r.get("confidence_level", "LOW")).upper()
+                            votes    = r.get("vote_count", "?")
+                            n_models = r.get("n_models", 5)
+                            sig_date = r.get("date", "—")
+                            if hasattr(sig_date, "strftime"):
+                                sig_date = sig_date.strftime("%Y-%m-%d")
 
-    styled = (
-        disp.style
-        .map(_dir_style, subset=["Direction"])
-        .map(_cl_style, subset=["Conf Level"])
-    )
-    st.dataframe(styled, use_container_width=True, hide_index=True)
+                            dir_col  = DIRECTION_COLOR.get(ens_dir, C_GREY)
 
-    section_divider("Cumulative Ensemble Prediction by Asset")
+                            # Build model predictions rows
+                            pred_rows = []
+                            for mc in MODEL_COLS:
+                                if mc in r.index:
+                                    mn = MODEL_NAMES.get(mc, mc)
+                                    pred_rows.append(f"<span style='color:{C_GREY};font-size:0.72rem;'>{mn}:</span> {_pred_arrow(r[mc])}")
 
-    col1, col2 = st.columns([2, 1])
-    with col1:
-        sel_assets = st.multiselect(
-            "Assets", options=sorted(df["asset"].unique()),
-            default=sorted(df["asset"].unique()),
-        )
-    with col2:
-        sel_horizon = st.selectbox(
-            "Horizon", options=["short", "medium", "long"],
-            format_func=lambda x: HORIZON_MAP.get(x, x),
-        )
+                            preds_html = " &nbsp; ".join(pred_rows)
 
-    fig = go.Figure()
-    palette = [C_BLUE, C_GREEN, C_YELLOW, C_RED, "#a855f7", "#06b6d4"]
-    for i, asset in enumerate(sel_assets):
-        adf = df[(df["asset"] == asset) & (df["horizon"] == sel_horizon)].sort_values("date").copy()
-        if adf.empty:
-            continue
-        adf["cumulative"] = adf["ensemble_pred"].cumsum()
-        fig.add_trace(go.Scatter(
-            x=adf["date"], y=adf["cumulative"],
-            name=asset, mode="lines",
-            line=dict(color=palette[i % len(palette)], width=2),
-            hovertemplate=f"<b>{asset}</b><br>%{{x|%Y-%m-%d}}<br>Cumulative: %{{y:.4f}}<extra></extra>",
-        ))
-    fig.add_hline(y=0, line_dash="dot", line_color=C_GREY, opacity=0.5)
-    fig.update_layout(
-        **PLOTLY_BASE,
-        title=f"Cumulative Ensemble Prediction — {HORIZON_MAP.get(sel_horizon, sel_horizon)}",
-        xaxis_title="Date", yaxis_title="Cumulative Prediction Signal",
-    )
-    add_rangeselector(fig, ["1M", "3M", "6M", "1Y", "All"])
-    st.plotly_chart(fig, use_container_width=True)
-    st.caption("Chart shows cumulative sum of ensemble prediction values — used as directional signal trend, not realized P&L.")
+                            st.markdown(
+                                f"<div style='background:{C_CARD};border-radius:8px;padding:14px;"
+                                f"border:1px solid {dir_col}55;border-left:3px solid {dir_col};'>"
+                                f"<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;'>"
+                                f"<span style='font-weight:700;color:#e2e8f0;'>{hz_label}</span>"
+                                f"{_dir_badge(ens_dir)}"
+                                f"</div>"
+                                f"<div style='margin-bottom:6px;'>{_conf_badge(conf_lvl)}"
+                                f" &nbsp; <span style='color:{C_GREY};font-size:0.75rem;'>{votes}/{n_models} agree</span>"
+                                f"</div>"
+                                f"<div style='font-size:0.72rem;line-height:1.8;'>{preds_html}</div>"
+                                f"<div style='color:{C_GREY};font-size:0.7rem;margin-top:6px;'>📅 {sig_date}</div>"
+                                f"</div>",
+                                unsafe_allow_html=True,
+                            )
+                    st.markdown("---")
+        except Exception as e:
+            st.error(f"Signals tab error: {e}")
 
-    section_divider("Model Agreement by Asset & Horizon")
+    # ── Tab 2: Summary Table ───────────────────────────────────────────────
+    with tabs[1]:
+        try:
+            if meta_df.empty:
+                st.info("No data.")
+            else:
+                latest = (
+                    meta_df.sort_values("date")
+                    .groupby(["asset", "horizon"])
+                    .last()
+                    .reset_index()
+                )
+                latest["Horizon"] = latest["horizon"].map(HORIZON_LABEL).fillna(latest["horizon"])
+                latest["Asset"]   = latest["asset"].map(ASSET_LABELS).fillna(latest["asset"])
 
-    latest["agreement_pct"] = (latest["vote_count"] / latest["n_models"] * 100).round(1)
-    fig2 = px.bar(
-        latest.sort_values("asset"),
-        x="asset", y="agreement_pct", color="horizon_label",
-        barmode="group",
-        title="Model Vote Agreement (%)",
-        labels={"agreement_pct": "Agreement (%)", "asset": "Asset", "horizon_label": "Horizon"},
-        color_discrete_sequence=[C_BLUE, C_GREEN, C_YELLOW],
-    )
-    fig2.update_layout(**PLOTLY_BASE, yaxis=dict(range=[0, 105]))
-    st.plotly_chart(fig2, use_container_width=True)
+                display_cols = ["Asset", "Horizon"]
+                for mc in MODEL_COLS:
+                    if mc in latest.columns:
+                        display_cols.append(mc)
+                for extra in ["ensemble_direction", "confidence_level", "vote_count"]:
+                    if extra in latest.columns:
+                        display_cols.append(extra)
+
+                disp = latest[[c for c in display_cols if c in latest.columns]].copy()
+                disp = disp.rename(columns={mc: MODEL_NAMES[mc] for mc in MODEL_COLS if mc in disp.columns})
+                disp = disp.rename(columns={
+                    "ensemble_direction": "Direction",
+                    "confidence_level": "Confidence",
+                    "vote_count": "Votes",
+                })
+
+                def _color_dir(val):
+                    col = DIRECTION_COLOR.get(str(val).upper(), "")
+                    if col:
+                        return f"color: {col}; font-weight: bold"
+                    return ""
+
+                styled = disp.style
+                if "Direction" in disp.columns:
+                    styled = styled.applymap(_color_dir, subset=["Direction"])
+                for mc_name in MODEL_NAMES.values():
+                    if mc_name in disp.columns:
+                        styled = styled.background_gradient(subset=[mc_name], cmap="RdYlGn", vmin=-1, vmax=1)
+
+                st.dataframe(styled, use_container_width=True, hide_index=True)
+        except Exception as e:
+            st.error(f"Summary table error: {e}")
+
+    # ── Tab 3: History ─────────────────────────────────────────────────────
+    with tabs[2]:
+        try:
+            if meta_df.empty:
+                st.info("No data.")
+            else:
+                disp = meta_df.copy()
+                disp["Horizon"] = disp["horizon"].map(HORIZON_LABEL).fillna(disp["horizon"])
+                disp["Asset"]   = disp["asset"].map(ASSET_LABELS).fillna(disp["asset"])
+                disp["Date"]    = disp["date"].dt.strftime("%Y-%m-%d")
+
+                # Filters
+                fc1, fc2, fc3 = st.columns(3)
+                with fc1:
+                    sel_assets = st.multiselect("Asset", options=list(ASSET_LABELS.values()),
+                                                default=list(ASSET_LABELS.values()), key="hist_asset")
+                with fc2:
+                    sel_hz = st.multiselect("Horizon", options=["3-Day","10-Day","40-Day"],
+                                            default=["3-Day","10-Day","40-Day"], key="hist_hz")
+                with fc3:
+                    sel_dir = st.multiselect("Direction", options=["LONG","SHORT","NEUTRAL"],
+                                             default=["LONG","SHORT","NEUTRAL"], key="hist_dir")
+
+                mask = (
+                    disp["Asset"].isin(sel_assets) &
+                    disp["Horizon"].isin(sel_hz)
+                )
+                if "ensemble_direction" in disp.columns:
+                    mask &= disp["ensemble_direction"].str.upper().isin(sel_dir)
+                disp = disp[mask]
+
+                show_cols = ["Date", "Asset", "Horizon"]
+                if "ensemble_direction" in disp.columns:
+                    show_cols.append("ensemble_direction")
+                if "confidence_level" in disp.columns:
+                    show_cols.append("confidence_level")
+                if "vote_count" in disp.columns:
+                    show_cols.append("vote_count")
+                for mc in MODEL_COLS:
+                    if mc in disp.columns:
+                        show_cols.append(mc)
+
+                disp_out = disp[[c for c in show_cols if c in disp.columns]].sort_values("Date", ascending=False)
+                disp_out = disp_out.rename(columns={mc: MODEL_NAMES[mc] for mc in MODEL_COLS if mc in disp_out.columns})
+                disp_out = disp_out.rename(columns={
+                    "ensemble_direction": "Direction",
+                    "confidence_level": "Confidence",
+                    "vote_count": "Votes",
+                })
+                st.dataframe(disp_out, use_container_width=True, hide_index=True, height=500)
+        except Exception as e:
+            st.error(f"History tab error: {e}")
+
+    # ── Tab 4: P&L ────────────────────────────────────────────────────────
+    with tabs[3]:
+        try:
+            if meta_df.empty:
+                st.info("No data available for P&L computation.")
+            else:
+                st.markdown("**Directional signal P&L** — cumulative score of correct direction calls (LONG=+1, SHORT=-1, NEUTRAL=0)")
+
+                for asset in ASSETS:
+                    asset_df = meta_df[meta_df["asset"] == asset].copy()
+                    if asset_df.empty:
+                        continue
+
+                    label = ASSET_LABELS.get(asset, asset)
+                    st.markdown(f"#### {label}")
+
+                    fig = go.Figure()
+                    for hz_key, hz_day, hz_label in HORIZONS:
+                        hz_df = asset_df[asset_df["horizon"] == hz_key].sort_values("date").copy()
+                        if hz_df.empty or "ensemble_direction" not in hz_df.columns:
+                            continue
+                        hz_df["signal_val"] = hz_df["ensemble_direction"].map(
+                            {"LONG": 1, "SHORT": -1, "NEUTRAL": 0, "FLAT": 0}
+                        ).fillna(0)
+                        hz_df["cumulative"] = hz_df["signal_val"].cumsum()
+                        fig.add_trace(go.Scatter(
+                            x=hz_df["date"], y=hz_df["cumulative"],
+                            mode="lines", name=hz_label,
+                            hovertemplate="%{x|%Y-%m-%d}<br>Cum: %{y}<extra></extra>",
+                        ))
+
+                    fig.update_layout(
+                        **PLOTLY_BASE,
+                        height=300,
+                        xaxis=dict(rangeselector=_rangeselector(), rangeslider=dict(visible=False)),
+                        yaxis_title="Cumulative directional score",
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+
+                # Summary stats per asset+horizon
+                st.markdown("#### Direction Summary")
+                rows = []
+                for asset in ASSETS:
+                    for hz_key, _, hz_label in HORIZONS:
+                        sub = meta_df[(meta_df["asset"] == asset) & (meta_df["horizon"] == hz_key)]
+                        if sub.empty or "ensemble_direction" not in sub.columns:
+                            continue
+                        vals = sub["ensemble_direction"].str.upper()
+                        total = len(vals)
+                        rows.append({
+                            "Asset": ASSET_LABELS.get(asset, asset),
+                            "Horizon": hz_label,
+                            "Total Signals": total,
+                            "LONG": int((vals == "LONG").sum()),
+                            "SHORT": int((vals == "SHORT").sum()),
+                            "NEUTRAL": int((vals == "NEUTRAL").sum()),
+                        })
+                if rows:
+                    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        except Exception as e:
+            st.error(f"P&L tab error: {e}")
+
+    # ── Tab 5: Performance (signal flips) ─────────────────────────────────
+    with tabs[4]:
+        try:
+            if meta_df.empty:
+                st.info("No data.")
+            else:
+                flips = []
+                for (asset, hz), grp in meta_df.groupby(["asset", "horizon"]):
+                    grp = grp.sort_values("date").copy()
+                    if "ensemble_direction" not in grp.columns:
+                        continue
+                    prev_dir = grp["ensemble_direction"].shift(1)
+                    changed  = grp["ensemble_direction"] != prev_dir
+                    for _, row in grp[changed & prev_dir.notna()].iterrows():
+                        flips.append({
+                            "Date": row["date"].strftime("%Y-%m-%d") if hasattr(row["date"], "strftime") else str(row["date"])[:10],
+                            "Asset": ASSET_LABELS.get(asset, asset),
+                            "Horizon": HORIZON_LABEL.get(hz, hz),
+                            "From": prev_dir[row.name],
+                            "To": row["ensemble_direction"],
+                            "Confidence": row.get("confidence_level", "—"),
+                            "Votes": row.get("vote_count", "—"),
+                        })
+
+                if not flips:
+                    st.info("No signal flips detected.")
+                else:
+                    flip_df = pd.DataFrame(flips).sort_values("Date", ascending=False)
+                    st.markdown(f"**{len(flip_df)} signal flips detected**")
+
+                    def _color_flip(val):
+                        col = DIRECTION_COLOR.get(str(val).upper(), "")
+                        return f"color: {col}; font-weight: bold" if col else ""
+
+                    styled = flip_df.style
+                    for col in ["From", "To"]:
+                        if col in flip_df.columns:
+                            styled = styled.applymap(_color_flip, subset=[col])
+                    st.dataframe(styled, use_container_width=True, hide_index=True)
+        except Exception as e:
+            st.error(f"Performance tab error: {e}")
+
+    # ── Tab 6: Indicators ─────────────────────────────────────────────────
+    with tabs[5]:
+        try:
+            st.markdown("### Intermarket Indicator Framework")
+            st.markdown("""
+The ML pipeline derives features from **intermarket ratios** and macroeconomic indicators
+that historically lead or confirm equity and crypto market direction.
+
+**Core ratio clusters:**
+""")
+            indicators_data = [
+                ("FXI / RCD", "China vs US Consumer Discretionary", "Global growth risk appetite"),
+                ("EEM / SPY", "Emerging Markets vs US Equities", "Global vs domestic risk"),
+                ("HYG / IEI", "High Yield vs Intermediate Treasuries", "Credit risk / risk-on gauge"),
+                ("TLT / SPY", "Long Bonds vs S&P 500", "Flight-to-safety signal"),
+                ("GLD / USO", "Gold vs Oil", "Commodity regime shift"),
+                ("XLE / XLU", "Energy vs Utilities", "Cyclical vs defensive rotation"),
+                ("DBC / DXY", "Commodities vs USD", "Dollar vs commodity regime"),
+                ("VIX",       "CBOE Volatility Index", "Fear gauge / regime detection"),
+                ("EUROSTOXX vs USD", "European equity cluster", "Cross-market confirmation"),
+                ("BTC / ETH", "Bitcoin vs Ethereum", "Crypto dominance regime"),
+                ("QQQ / SPY", "Nasdaq vs S&P 500", "Tech leadership signal"),
+                ("IWM / SPY", "Small Cap vs Large Cap", "Risk appetite / breadth"),
+            ]
+            ind_df = pd.DataFrame(indicators_data, columns=["Indicator", "Pair Description", "Signal Type"])
+            st.dataframe(ind_df, use_container_width=True, hide_index=True)
+
+            if not meta_df.empty and "date" in meta_df.columns:
+                st.markdown("### Recent Signal Context")
+                latest = meta_df.sort_values("date").groupby(["asset","horizon"]).last().reset_index()
+                context_rows = []
+                for _, row in latest.iterrows():
+                    context_rows.append({
+                        "Asset": ASSET_LABELS.get(row["asset"], row["asset"]),
+                        "Horizon": HORIZON_LABEL.get(row["horizon"], row["horizon"]),
+                        "Ensemble": row.get("ensemble_direction", "—"),
+                        "Confidence": row.get("confidence_level", "—"),
+                        "Votes": f"{row.get('vote_count','?')}/{row.get('n_models',5)}",
+                        "Date": row["date"].strftime("%Y-%m-%d") if hasattr(row["date"],"strftime") else str(row["date"])[:10],
+                    })
+                st.dataframe(pd.DataFrame(context_rows), use_container_width=True, hide_index=True)
+        except Exception as e:
+            st.error(f"Indicators tab error: {e}")
+
+    # ── Tab 7: Models ─────────────────────────────────────────────────────
+    with tabs[6]:
+        try:
+            st.markdown("### Model Architecture")
+            model_cards = [
+                ("TFT", "Temporal Fusion Transformer", "Deep learning · attention mechanism · handles multi-horizon sequences. Input: 60-step windows across hourly/daily/weekly bars."),
+                ("LightGBM", "LightGBM (Gradient Boosting)", "Fast gradient boosted trees. 200+ features including intermarket ratios, momentum, volatility."),
+                ("XGBoost", "XGBoost", "Regularized gradient boosting. Separate models per asset × horizon. Strong on tabular features."),
+                ("Ridge", "Ridge Regression (L2)", "Linear baseline with L2 regularization. Interpretable. Useful for momentum/trend feature combinations."),
+                ("Random Forest", "Random Forest", "Bootstrap ensemble of decision trees. Robust to noisy features. 500 trees per model."),
+                ("Ensemble", "Meta-Ensemble (Voting)", "Weighted vote across TFT+LGB+XGB+Ridge+RF. Weight = directional accuracy on rolling 20-day window."),
+            ]
+            c1, c2 = st.columns(2)
+            for i, (short, full, desc) in enumerate(model_cards):
+                col = c1 if i % 2 == 0 else c2
+                with col:
+                    st.markdown(
+                        f"<div style='background:{C_CARD};border-radius:8px;padding:14px;"
+                        f"border:1px solid #2d3748;margin-bottom:10px;'>"
+                        f"<div style='font-weight:700;color:#f1f5f9;font-size:1rem;'>{short}</div>"
+                        f"<div style='color:{C_BLUE};font-size:0.82rem;margin-bottom:4px;'>{full}</div>"
+                        f"<div style='color:{C_GREY};font-size:0.78rem;'>{desc}</div>"
+                        f"</div>",
+                        unsafe_allow_html=True,
+                    )
+
+            if not meta_df.empty and "ensemble_direction" in meta_df.columns:
+                st.markdown("### Model Directional Accuracy vs Ensemble")
+                st.markdown("Fraction of signals where each model matches the ensemble direction.")
+
+                acc_rows = []
+                for asset in ASSETS:
+                    asset_df = meta_df[meta_df["asset"] == asset]
+                    for mc in MODEL_COLS[:-1]:  # skip ensemble_pred itself
+                        if mc not in asset_df.columns:
+                            continue
+                        ens = asset_df["ensemble_direction"].str.upper()
+                        pred_dir = asset_df[mc].apply(lambda v: "LONG" if (not pd.isna(v) and float(v) > 0) else ("SHORT" if (not pd.isna(v) and float(v) < 0) else "NEUTRAL"))
+                        acc = (pred_dir == ens).mean()
+                        acc_rows.append({
+                            "Model": MODEL_NAMES.get(mc, mc),
+                            "Asset": ASSET_LABELS.get(asset, asset),
+                            "Accuracy": round(acc * 100, 1),
+                        })
+
+                if acc_rows:
+                    acc_df  = pd.DataFrame(acc_rows)
+                    pivot   = acc_df.pivot(index="Model", columns="Asset", values="Accuracy")
+                    fig_hm  = go.Figure(go.Heatmap(
+                        z=pivot.values,
+                        x=list(pivot.columns),
+                        y=list(pivot.index),
+                        colorscale=[[0, C_RED],[0.5, C_YELLOW],[1, C_GREEN]],
+                        zmin=0, zmax=100,
+                        text=[[f"{v:.0f}%" for v in row] for row in pivot.values],
+                        texttemplate="%{text}",
+                        hovertemplate="Model: %{y}<br>Asset: %{x}<br>Accuracy: %{z:.1f}%<extra></extra>",
+                    ))
+                    fig_hm.update_layout(**PLOTLY_BASE, height=300, margin=dict(l=100,r=20,t=40,b=60))
+                    st.plotly_chart(fig_hm, use_container_width=True)
+        except Exception as e:
+            st.error(f"Models tab error: {e}")
+
+    # ── Tab 8: Ensemble ───────────────────────────────────────────────────
+    with tabs[7]:
+        try:
+            if meta_df.empty:
+                st.info("No data.")
+            else:
+                st.markdown("### Model Agreement Grid")
+                st.markdown("Latest vote_count/n_models per asset × horizon. Darker green = higher consensus.")
+
+                latest = (
+                    meta_df.sort_values("date")
+                    .groupby(["asset","horizon"])
+                    .last()
+                    .reset_index()
+                )
+
+                if "vote_count" in latest.columns and "n_models" in latest.columns:
+                    latest["agreement"] = latest["vote_count"] / latest["n_models"].replace(0, np.nan)
+                    pivot = latest.pivot(index="asset", columns="horizon", values="agreement")
+                    pivot.index = [ASSET_LABELS.get(a, a) for a in pivot.index]
+                    # Reorder columns
+                    hz_order = ["short","medium","long"]
+                    pivot = pivot.reindex(columns=[h for h in hz_order if h in pivot.columns])
+                    pivot.columns = [HORIZON_LABEL.get(c, c) for c in pivot.columns]
+
+                    # Text overlay
+                    votes_pivot = latest.pivot(index="asset", columns="horizon", values="vote_count")
+                    nmod_pivot  = latest.pivot(index="asset", columns="horizon", values="n_models")
+                    votes_pivot.index = [ASSET_LABELS.get(a, a) for a in votes_pivot.index]
+                    nmod_pivot.index  = [ASSET_LABELS.get(a, a) for a in nmod_pivot.index]
+                    votes_pivot = votes_pivot.reindex(columns=[h for h in hz_order if h in votes_pivot.columns])
+                    nmod_pivot  = nmod_pivot.reindex(columns=[h for h in hz_order if h in nmod_pivot.columns])
+                    votes_pivot.columns = [HORIZON_LABEL.get(c, c) for c in votes_pivot.columns]
+                    nmod_pivot.columns  = [HORIZON_LABEL.get(c, c) for c in nmod_pivot.columns]
+
+                    text = [[f"{int(votes_pivot.iloc[r,c])}/{int(nmod_pivot.iloc[r,c])}"
+                             if not pd.isna(pivot.iloc[r,c]) else "—"
+                             for c in range(pivot.shape[1])]
+                            for r in range(pivot.shape[0])]
+
+                    fig = go.Figure(go.Heatmap(
+                        z=pivot.values,
+                        x=list(pivot.columns),
+                        y=list(pivot.index),
+                        colorscale=[[0, C_RED],[0.4, C_YELLOW],[0.7, C_GREEN],[1.0,"#15803d"]],
+                        zmin=0, zmax=1,
+                        text=text,
+                        texttemplate="%{text}",
+                        hovertemplate="Asset: %{y}<br>Horizon: %{x}<br>Agreement: %{z:.0%}<extra></extra>",
+                    ))
+                    fig.update_layout(**PLOTLY_BASE, height=350, margin=dict(l=80,r=20,t=40,b=60))
+                    st.plotly_chart(fig, use_container_width=True)
+
+                    # Direction overlay table
+                    if "ensemble_direction" in latest.columns:
+                        dir_pivot = latest.pivot(index="asset", columns="horizon", values="ensemble_direction")
+                        dir_pivot.index   = [ASSET_LABELS.get(a, a) for a in dir_pivot.index]
+                        dir_pivot         = dir_pivot.reindex(columns=[h for h in hz_order if h in dir_pivot.columns])
+                        dir_pivot.columns = [HORIZON_LABEL.get(c, c) for c in dir_pivot.columns]
+                        st.markdown("**Current ensemble directions:**")
+                        st.dataframe(dir_pivot, use_container_width=True)
+                else:
+                    st.info("vote_count or n_models columns not found in data.")
+        except Exception as e:
+            st.error(f"Ensemble tab error: {e}")
+
+    # ── Tab 9: Overview ───────────────────────────────────────────────────
+    with tabs[8]:
+        try:
+            st.markdown("""
+## Intermarket Ratio ML Pipeline
+
+An end-to-end machine learning system that generates **directional signals** for 4 assets
+(SPY, QQQ, Gold, BTC) across **3 horizons** (3-day, 10-day, 40-day) using 5 ML models
+combined into a meta-ensemble.
+
+### Phase Summary
+| Phase | Description | Status |
+|-------|-------------|--------|
+| 1 | Data collection (OHLCV + intermarket ratios) | ✅ Complete |
+| 2 | Feature engineering (200+ features per asset) | ✅ Complete |
+| 3 | Model training — LightGBM + XGBoost + Ridge + RF | ✅ Complete |
+| 4 | TFT (Temporal Fusion Transformer) multi-horizon | ✅ Complete |
+| 5 | Meta-ensemble (weighted voting) | ✅ Complete |
+| 6 | Signal logging + history tracking | ✅ Complete |
+| 7 | Telegram alerts (morning 9:30 AM ET) | ✅ Complete |
+| 8A | Dashboard + hub integration | ✅ Complete |
+
+### How to Interpret Signals
+
+| Signal | Meaning | Action |
+|--------|---------|--------|
+| 🟢 LONG + HIGH conf | ≥4 models agree bullish | Consider long position |
+| 🟢 LONG + MED conf | 3 models agree bullish | Watch for confirmation |
+| 🔴 SHORT + HIGH conf | ≥4 models agree bearish | Consider hedge/short |
+| ⚪ NEUTRAL | Models disagree | No directional edge |
+
+**Key rule**: Only act on HIGH confidence signals where vote_count ≥ 4/5.
+Short-horizon (3-day) signals are noisier; 40-day signals carry more weight.
+
+### Data cadence
+- Short (3-day): hourly bars, updated daily morning
+- Medium (10-day): daily bars, updated daily morning
+- Long (40-day): weekly bars, updated weekly
+""")
+        except Exception as e:
+            st.error(f"Overview tab error: {e}")
 
 
-# ── Section 3: CAN SLIM / SEPA ────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# CAN SLIM SECTION
+# ══════════════════════════════════════════════════════════════════════════════
 
-def render_canslim():
-    st.title("📈 CAN SLIM / SEPA Setups")
-    st.markdown("Composite stock rankings using CAN SLIM criteria + SEPA trend template")
+elif section == "📈 CAN SLIM":
+    st.title("📈 CAN SLIM + SEPA/VCP Screener")
 
     try:
-        df = load_canslim()
+        cs_df  = load_canslim_rankings()
+        pat_df = load_canslim_patterns()
     except Exception as e:
         st.error(f"Failed to load CAN SLIM data: {e}")
-        return
+        cs_df  = pd.DataFrame()
+        pat_df = pd.DataFrame()
 
-    top_df = df[df["composite_score"] >= 80].sort_values("composite_score", ascending=False).copy()
+    tabs = st.tabs([
+        "🏆 Top Setups",
+        "📊 Analytics",
+        "🔍 Stock Drilldown",
+        "📈 Backtest",
+        "📖 About",
+    ])
 
-    section_divider(f"Top Setups — A / A+ Tier  ·  Score ≥ 80  ·  {len(top_df)} stocks")
-
-    if top_df.empty:
-        st.info("No A/A+ setups currently. Showing top 20 by composite score instead.")
-        top_df = df.sort_values("composite_score", ascending=False).head(20).copy()
-
-    # Build HTML table with TradingView links and tier badges
-    def tier_badge_html(score: float, tier) -> str:
-        if score >= 90:
-            return badge_html("A+", C_GREEN)
-        elif score >= 80:
-            return badge_html("A", "#16a34a")
-        elif score >= 70:
-            return badge_html("B+", C_YELLOW)
-        elif score >= 60:
-            return badge_html("B", "#ca8a04")
-        else:
-            return badge_html(str(tier) if pd.notna(tier) else "C", C_GREY)
-
-    def tv_link(ticker: str) -> str:
-        return (
-            f'<a href="https://www.tradingview.com/chart/?symbol={ticker}" '
-            f'target="_blank" style="color:{C_BLUE};font-weight:600;'
-            f'text-decoration:none">{ticker} ↗</a>'
-        )
-
-    rows_html = ""
-    for _, r in top_df.iterrows():
-        ticker  = str(r["ticker"])
-        score   = float(r["composite_score"])
-        tier    = r.get("tier", "")
-        pattern = str(r.get("best_pattern", "—")).upper() if pd.notna(r.get("best_pattern")) else "—"
-        sector  = str(r.get("sector", "—")) if pd.notna(r.get("sector")) else "—"
-        price   = r.get("price", None)
-        price_s = f"${price:.2f}" if price is not None and pd.notna(price) else "—"
-        rows_html += (
-            f"<tr>"
-            f"<td>{tv_link(ticker)}</td>"
-            f"<td style='text-align:center'>{tier_badge_html(score, tier)}</td>"
-            f"<td style='text-align:right;color:{score_color(score/10)};font-weight:700'>{score:.1f}</td>"
-            f"<td style='color:{C_GREY}'>{pattern}</td>"
-            f"<td style='color:#fff'>{sector}</td>"
-            f"<td style='color:#aaa'>{price_s}</td>"
-            f"</tr>"
-        )
-
-    st.markdown(
-        f"""
-        <style>
-        .cs-table {{width:100%;border-collapse:collapse;font-size:0.9em;margin-bottom:12px}}
-        .cs-table th {{background:{C_CARD};color:{C_GREY};padding:10px 12px;
-                       text-align:left;font-size:0.78em;text-transform:uppercase;
-                       letter-spacing:0.05em;border-bottom:1px solid #2d3748}}
-        .cs-table td {{padding:8px 12px;border-bottom:1px solid #1e2433;vertical-align:middle}}
-        .cs-table tr:hover td {{background:{C_CARD}88}}
-        </style>
-        <table class="cs-table">
-          <thead>
-            <tr>
-              <th>Ticker</th><th>Tier</th><th style="text-align:right">Score</th>
-              <th>Pattern</th><th>Sector</th><th>Price</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows_html}
-          </tbody>
-        </table>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    section_divider("Sector Breakdown — A/A+ Setups")
-
-    col_chart, col_score = st.columns([3, 2])
-    with col_chart:
-        sector_counts = (
-            top_df.groupby("sector").size()
-            .reset_index(name="count")
-            .sort_values("count", ascending=True)
-        )
-        fig = px.bar(
-            sector_counts, x="count", y="sector", orientation="h",
-            title="A/A+ Setups by Sector",
-            labels={"count": "# Setups", "sector": "Sector"},
-            color="count",
-            color_continuous_scale=[[0, C_BLUE], [0.5, C_GREEN], [1, C_GREEN]],
-        )
-        fig.update_layout(**PLOTLY_BASE, showlegend=False, height=350)
-        st.plotly_chart(fig, use_container_width=True)
-
-    with col_score:
-        fig2 = px.histogram(
-            df, x="composite_score", nbins=20,
-            title="Score Distribution (all stocks)",
-            labels={"composite_score": "Composite Score"},
-            color_discrete_sequence=[C_BLUE],
-        )
-        fig2.add_vline(x=80, line_dash="dash", line_color=C_GREEN,
-                       annotation_text="A threshold (80)")
-        fig2.update_layout(**PLOTLY_BASE, height=350)
-        st.plotly_chart(fig2, use_container_width=True)
-
-    section_divider("Stock Drill-Down")
-
-    all_tickers = df.sort_values("composite_score", ascending=False)["ticker"].tolist()
-    selected = st.selectbox("Select a stock for detailed breakdown", all_tickers)
-
-    if selected:
-        row = df[df["ticker"] == selected].iloc[0]
-        score = float(row["composite_score"])
-        tier  = str(row.get("tier", ""))
-        sc    = score_color(score / 10)
-
-        # Score summary header
-        st.markdown(
-            f'<div style="background:{C_CARD};border-radius:10px;padding:16px 24px;'
-            f'margin:10px 0;display:flex;align-items:center;gap:20px">'
-            f'<div><span style="font-size:2.5em;font-weight:800;color:{sc}">{score:.1f}</span>'
-            f'<span style="color:{C_GREY};font-size:1em"> / 100</span></div>'
-            f'<div>{badge_html(tier if tier else "—", sc, "1em")}'
-            f'<div style="color:{C_GREY};font-size:0.8em;margin-top:4px">'
-            f'Composite Score — {selected}</div></div>'
-            f'</div>',
-            unsafe_allow_html=True,
-        )
-
-        col_tech, col_fund, col_mkt = st.columns(3)
-
-        with col_tech:
-            st.markdown("**Technical Sub-Scores**")
-            rs = row.get("rs_rating", None)
-            tt = row.get("trend_template_pass", None)
-            sq = row.get("squeeze_fired", None)
-            pt = row.get("best_pattern", None)
-            ts = row.get("technical_score", None)
-            tech_items = [
-                ("Technical Score", f"{ts:.1f}/100" if ts is not None and pd.notna(ts) else "—"),
-                ("RS Rating", f"{rs:.0f}" if rs is not None and pd.notna(rs) else "—"),
-                ("Trend Template", "✅ Pass" if tt else "❌ Fail"),
-                ("Squeeze Fired", "✅ Yes" if sq else "❌ No"),
-                ("Best Pattern", str(pt).upper() if pd.notna(pt) else "—"),
-            ]
-            for k, v in tech_items:
-                st.metric(k, v)
-
-        with col_fund:
-            st.markdown("**Fundamental Sub-Scores**")
-            fs  = row.get("fundamental_score", None)
-            ms  = row.get("market_score", None)
-            ps  = row.get("pattern_score", None)
-            pr  = row.get("price", None)
-            sec = row.get("sector", None)
-            fund_items = [
-                ("Fundamental Score", f"{fs:.1f}/100" if fs is not None and pd.notna(fs) else "—"),
-                ("Market Score",      f"{ms:.1f}/100" if ms is not None and pd.notna(ms) else "—"),
-                ("Pattern Score",     f"{ps:.1f}/100" if ps is not None and pd.notna(ps) else "—"),
-                ("Price",             f"${pr:.2f}" if pr is not None and pd.notna(pr) else "—"),
-                ("Sector",            str(sec) if pd.notna(sec) else "—"),
-            ]
-            for k, v in fund_items:
-                st.metric(k, v)
-
-        with col_mkt:
-            st.markdown("**Score Component Chart**")
-            cats = ["Technical", "Fundamental", "Pattern", "Market"]
-            vals = [
-                float(row.get("technical_score", 0) or 0),
-                float(row.get("fundamental_score", 0) or 0),
-                float(row.get("pattern_score", 0) or 0),
-                float(row.get("market_score", 0) or 0),
-            ]
-            colors = [C_BLUE, C_GREEN, C_YELLOW, "#a855f7"]
-            fig3 = go.Figure(go.Bar(
-                x=cats, y=vals,
-                marker_color=colors,
-                text=[f"{v:.1f}" for v in vals],
-                textposition="outside",
-                textfont=dict(color="#fff"),
-            ))
-            fig3.update_layout(
-                **PLOTLY_BASE,
-                title=f"{selected} — Sub-Scores",
-                yaxis=dict(range=[0, 110]),
-                height=320,
-            )
-            st.plotly_chart(fig3, use_container_width=True)
-
-    section_divider("Backtest Results")
-    st.info(
-        "Backtest data not included in current data snapshot. "
-        "When backtest runs are available, results will display here including: "
-        "holding period, entry/exit dates, return per setup, win rate."
-    )
-
-
-# ── Section 4: Crypto ─────────────────────────────────────────────────────────
-
-def render_crypto():
-    st.title("🪙 Crypto Rankings")
-    st.markdown("Multi-factor analysis: RS · Technical · Fundamental · RRG Regime")
-
-    try:
-        df = load_crypto()
-    except Exception as e:
-        st.error(f"Failed to load crypto data: {e}")
-        return
-
-    run_date = df["run_date"].iloc[0].strftime("%Y-%m-%d") if "run_date" in df.columns else "latest"
-    st.markdown(f"**Run date:** `{run_date}` — **{len(df)} assets** analysed")
-
-    # Derive tier if missing
-    def derive_tier(score):
-        if pd.isna(score): return "N/A"
-        if score >= 60:    return "A"
-        if score >= 50:    return "B"
-        if score >= 40:    return "C"
-        return "D"
-
-    tier_col = df.get("Tier", pd.Series(dtype=str))
-    if tier_col.isna().all() or (tier_col.astype(str) == "None").all():
-        df["Tier"] = df["Composite"].apply(derive_tier)
-
-    TIER_COLOR = {"A": C_GREEN, "B": C_YELLOW, "C": C_GREY, "D": C_RED, "N/A": C_GREY}
-
-    section_divider("Rankings Table")
-
-    show_cols = [c for c in ["Rank", "Symbol", "Composite", "Tier",
-                              "RS Score", "Tech Score", "Fund Score",
-                              "RRG Regime", "RS Momentum", "RS %ile"]
-                 if c in df.columns]
-    disp = df[show_cols].copy()
-
-    def _tier_style(val):
-        c = TIER_COLOR.get(str(val), C_GREY)
-        return f"background:{c}25;color:{c};font-weight:700"
-
-    def _comp_style(val):
+    # ── Tab 1: Top Setups ─────────────────────────────────────────────────
+    with tabs[0]:
         try:
-            v = float(val)
-            if v >= 60: return f"color:{C_GREEN};font-weight:700"
-            if v >= 40: return f"color:{C_YELLOW}"
-            return f"color:{C_RED}"
-        except Exception:
-            return ""
-
-    styled = disp.style
-    if "Tier" in disp.columns:
-        styled = styled.map(_tier_style, subset=["Tier"])
-    if "Composite" in disp.columns:
-        styled = styled.map(_comp_style, subset=["Composite"])
-        styled = styled.format({"Composite": "{:.2f}"}, na_rep="—")
-    for nc in ["RS Score", "Tech Score", "Fund Score", "RS Momentum", "RS %ile"]:
-        if nc in disp.columns:
-            styled = styled.format({nc: "{:.2f}"}, na_rep="—")
-
-    st.dataframe(styled, use_container_width=True, hide_index=True)
-
-    section_divider("Momentum vs Composite Score")
-
-    scatter_df = df.dropna(subset=["RS Momentum", "Composite"]).copy()
-    if not scatter_df.empty:
-        fig = px.scatter(
-            scatter_df,
-            x="RS Momentum",
-            y="Composite",
-            color="Tier",
-            text="Symbol",
-            color_discrete_map=TIER_COLOR,
-            title="RS Momentum vs Composite Score",
-            labels={"RS Momentum": "RS Momentum", "Composite": "Composite Score"},
-            hover_data=[c for c in ["Rank", "RRG Regime", "RS Score", "Tech Score"]
-                        if c in scatter_df.columns],
-        )
-        fig.update_traces(textposition="top center", marker=dict(size=10, opacity=0.85))
-        fig.add_hline(y=50, line_dash="dash", line_color=C_GREY, opacity=0.4,
-                      annotation_text="Score = 50")
-        fig.add_vline(x=0, line_dash="dash", line_color=C_GREY, opacity=0.4,
-                      annotation_text="Momentum = 0")
-        fig.update_layout(**PLOTLY_BASE, height=520)
-        st.plotly_chart(fig, use_container_width=True)
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        section_divider("Score Distributions")
-        fig2 = go.Figure()
-        for col_name, color in [("RS Score", C_BLUE), ("Tech Score", C_GREEN),
-                                 ("Fund Score", C_YELLOW)]:
-            if col_name in df.columns:
-                vals = df[col_name].dropna()
-                fig2.add_trace(go.Histogram(
-                    x=vals, name=col_name, opacity=0.7,
-                    marker_color=color, nbinsx=12,
-                ))
-        fig2.update_layout(**PLOTLY_BASE, title="Score Distributions",
-                           barmode="overlay", height=300,
-                           xaxis_title="Score", yaxis_title="Count")
-        st.plotly_chart(fig2, use_container_width=True)
-
-    with col2:
-        if "RRG Regime" in df.columns and not df["RRG Regime"].isna().all():
-            section_divider("RRG Regime Breakdown")
-            regime_counts = df["RRG Regime"].value_counts().reset_index()
-            regime_counts.columns = ["Regime", "Count"]
-            fig3 = px.pie(
-                regime_counts, values="Count", names="Regime",
-                title="Assets by RRG Regime",
-                color_discrete_sequence=[C_GREEN, C_YELLOW, C_RED, C_BLUE, C_GREY],
-            )
-            fig3.update_layout(**PLOTLY_BASE, height=300)
-            st.plotly_chart(fig3, use_container_width=True)
-
-    st.info("Fear & Greed equivalent metric: not available in current data snapshot.")
-
-
-# ── Section 5: S&P 500 Breadth ────────────────────────────────────────────────
-
-def render_breadth():
-    st.title("🌊 S&P 500 Market Breadth")
-    st.markdown("Weekly internal breadth — index-level and sector-level indicators")
-
-    try:
-        bdf = load_breadth_index()
-        sdf = load_breadth_sector()
-    except Exception as e:
-        st.error(f"Failed to load breadth data: {e}")
-        return
-
-    latest = bdf.iloc[-1]
-    above200 = float(latest["above_200sma"])
-    regime, regime_color = regime_info(above200)
-
-    # Regime badge
-    st.markdown(
-        f'<div style="background:{regime_color}22;border:1px solid {regime_color};'
-        f'border-radius:10px;padding:14px 22px;display:inline-block;margin-bottom:18px">'
-        f'<span style="color:{regime_color};font-size:1.25em;font-weight:700">'
-        f'Market Regime: {regime}</span>'
-        f'<span style="color:{C_GREY};font-size:0.85em;margin-left:14px">'
-        f'{above200:.1f}% of S&P 500 stocks above 200-day SMA</span>'
-        f'</div>',
-        unsafe_allow_html=True,
-    )
-
-    section_divider("4 Key Breadth Metrics — WoW Delta")
-
-    col1, col2, col3, col4 = st.columns(4)
-    metric_cfg = [
-        ("% Above 50 SMA",  "above_50sma",  "above_50sma_wow",  col1),
-        ("% Above 200 SMA", "above_200sma", "above_200sma_wow", col2),
-        ("52W Highs %",     "new_52w_high", "new_52w_high_wow", col3),
-        ("52W Lows %",      "new_52w_low",  "new_52w_low_wow",  col4),
-    ]
-    for label, col_name, wow_col, widget in metric_cfg:
-        val = latest.get(col_name, None)
-        wow = latest.get(wow_col, None)
-        with widget:
-            if val is not None and not pd.isna(val):
-                delta_str = f"{float(wow):+.1f} pp WoW" if wow is not None and not pd.isna(wow) else None
-                st.metric(label, f"{float(val):.1f}%", delta=delta_str)
+            if cs_df.empty:
+                st.warning("No CAN SLIM data found at data/canslim/composite_rankings.csv")
             else:
-                st.metric(label, "—")
+                elite = cs_df[cs_df["composite_score"].fillna(0) >= 80].copy() if "composite_score" in cs_df.columns else cs_df.copy()
 
-    section_divider("Sector Health Table — ETF Tickers")
+                # Filters
+                fc1, fc2 = st.columns(2)
+                with fc1:
+                    tier_opts = sorted(cs_df["tier"].dropna().unique()) if "tier" in cs_df.columns else []
+                    sel_tiers = st.multiselect("Tier", options=tier_opts, default=[t for t in ["A+","A"] if t in tier_opts])
+                with fc2:
+                    sector_opts = sorted(cs_df["sector"].dropna().unique()) if "sector" in cs_df.columns else []
+                    sel_sectors = st.multiselect("Sector", options=sector_opts, default=sector_opts)
 
-    if not sdf.empty:
-        latest_sector = sdf.sort_values("date").groupby("sector", as_index=False).last()
-        max_date = sdf["date"].max()
-        four_weeks_ago = max_date - pd.Timedelta(weeks=4)
+                filtered = elite.copy()
+                if sel_tiers and "tier" in filtered.columns:
+                    filtered = filtered[filtered["tier"].isin(sel_tiers)]
+                if sel_sectors and "sector" in filtered.columns:
+                    filtered = filtered[filtered["sector"].isin(sel_sectors)]
+                if "composite_score" in filtered.columns:
+                    filtered = filtered.sort_values("composite_score", ascending=False)
 
-        rows = []
-        for _, sr in latest_sector.iterrows():
-            sector_name = str(sr["sector"])
-            etf = SECTOR_ETF.get(sector_name, "")
-            display_name = f"{sector_name} ({etf})" if etf else sector_name
+                st.markdown(f"**{len(filtered)} stocks** matching filters (score ≥ 80)")
 
-            a200   = sr.get("above_200sma", None)
-            a50    = sr.get("above_50sma", None)
-            highs  = sr.get("new_52w_high", None)
-            lows   = sr.get("new_52w_low", None)
+                display_cols = ["ticker","tier","composite_score","best_pattern","rs_rating",
+                                "trend_template_pass","squeeze_fired","price","sector"]
+                show_cols = [c for c in display_cols if c in filtered.columns]
+                disp = filtered[show_cols].copy().reset_index(drop=True)
+                disp = disp.rename(columns={
+                    "ticker": "Ticker", "tier": "Tier", "composite_score": "Score",
+                    "best_pattern": "Pattern", "rs_rating": "RS",
+                    "trend_template_pass": "Trend✓", "squeeze_fired": "Squeeze",
+                    "price": "Price", "sector": "Sector",
+                })
+                if "Score" in disp.columns:
+                    disp["Score"] = disp["Score"].round(1)
+                if "RS" in disp.columns:
+                    disp["RS"] = pd.to_numeric(disp["RS"], errors="coerce").round(0)
+                if "Price" in disp.columns:
+                    disp["Price"] = pd.to_numeric(disp["Price"], errors="coerce").round(2)
+                if "Trend✓" in disp.columns:
+                    disp["Trend✓"] = disp["Trend✓"].apply(lambda v: "✅" if bool(v) else "❌")
+                if "Squeeze" in disp.columns:
+                    disp["Squeeze"] = disp["Squeeze"].apply(lambda v: "🔥" if bool(v) else "")
 
-            # WoW from historical
-            sec_hist = sdf[sdf["sector"] == sector_name].sort_values("date")
-            if len(sec_hist) >= 2:
-                wow = float(sec_hist["above_200sma"].iloc[-1]) - float(sec_hist["above_200sma"].iloc[-2])
+                def _tier_color(val):
+                    col = TIER_COLOR_MAP.get(str(val), "")
+                    return f"color: {col}; font-weight: bold" if col else ""
+
+                styled = disp.style
+                if "Tier" in disp.columns:
+                    styled = styled.applymap(_tier_color, subset=["Tier"])
+                if "Score" in disp.columns:
+                    styled = styled.background_gradient(subset=["Score"], cmap="RdYlGn", vmin=60, vmax=100)
+
+                st.dataframe(styled, use_container_width=True, hide_index=True)
+
+                # TradingView links
+                if "Ticker" in disp.columns:
+                    tickers = disp["Ticker"].tolist()[:50]
+                    links = " · ".join([
+                        f'<a href="https://www.tradingview.com/chart/?symbol={t}" target="_blank" '
+                        f'style="color:{C_BLUE};">{t}</a>'
+                        for t in tickers
+                    ])
+                    st.markdown(f"<div style='font-size:0.8rem;'>📈 {links}</div>", unsafe_allow_html=True)
+        except Exception as e:
+            st.error(f"Top Setups error: {e}")
+
+    # ── Tab 2: Analytics ──────────────────────────────────────────────────
+    with tabs[1]:
+        try:
+            if cs_df.empty:
+                st.info("No data.")
             else:
-                wow = None
+                c1, c2 = st.columns(2)
 
-            mom_hist = sec_hist[sec_hist["date"] <= four_weeks_ago]
-            if not mom_hist.empty:
-                mom = float(sec_hist["above_200sma"].iloc[-1]) - float(mom_hist["above_200sma"].iloc[-1])
+                # Tier distribution
+                with c1:
+                    st.markdown("#### Tier Distribution")
+                    if "tier" in cs_df.columns:
+                        tier_counts = cs_df["tier"].value_counts().reindex(["A+","A","B","C","D"]).fillna(0).reset_index()
+                        tier_counts.columns = ["Tier","Count"]
+                        tier_counts["color"] = tier_counts["Tier"].map(TIER_COLOR_MAP).fillna(C_GREY)
+                        fig = go.Figure(go.Bar(
+                            x=tier_counts["Tier"], y=tier_counts["Count"],
+                            marker_color=tier_counts["color"].tolist(),
+                            text=tier_counts["Count"].astype(int),
+                            textposition="outside",
+                        ))
+                        fig.update_layout(**PLOTLY_BASE, height=300, showlegend=False,
+                                          xaxis_title="Tier", yaxis_title="Count")
+                        st.plotly_chart(fig, use_container_width=True)
+
+                # Score distribution
+                with c2:
+                    st.markdown("#### Score Distribution")
+                    if "composite_score" in cs_df.columns:
+                        scores = cs_df["composite_score"].dropna()
+                        fig = go.Figure(go.Histogram(
+                            x=scores, nbinsx=20,
+                            marker_color=C_BLUE, opacity=0.8,
+                        ))
+                        fig.update_layout(**PLOTLY_BASE, height=300,
+                                          xaxis_title="Composite Score", yaxis_title="Count")
+                        st.plotly_chart(fig, use_container_width=True)
+
+                # Sector breakdown
+                st.markdown("#### Sector Breakdown")
+                if "sector" in cs_df.columns and "tier" in cs_df.columns:
+                    sec_counts = cs_df.groupby("sector").size().reset_index(name="Count").sort_values("Count", ascending=True)
+                    fig = go.Figure(go.Bar(
+                        y=sec_counts["sector"], x=sec_counts["Count"],
+                        orientation="h",
+                        marker_color=C_BLUE,
+                        text=sec_counts["Count"],
+                        textposition="outside",
+                    ))
+                    fig.update_layout(**PLOTLY_BASE, height=max(300, len(sec_counts)*28),
+                                      xaxis_title="# Stocks", yaxis_title="")
+                    st.plotly_chart(fig, use_container_width=True)
+
+                # Score components by tier
+                st.markdown("#### Avg Score Components by Tier")
+                score_cols = [c for c in ["technical_score","fundamental_score","pattern_score","market_score"] if c in cs_df.columns]
+                if score_cols and "tier" in cs_df.columns:
+                    avg_by_tier = cs_df.groupby("tier")[score_cols].mean().reindex(["A+","A","B","C","D"]).dropna(how="all")
+                    fig = go.Figure()
+                    colors = [C_BLUE, C_GREEN, C_YELLOW, "#a855f7"]
+                    labels = {"technical_score":"Technical","fundamental_score":"Fundamental",
+                              "pattern_score":"Pattern","market_score":"Market"}
+                    for i, col in enumerate(score_cols):
+                        fig.add_trace(go.Bar(
+                            name=labels.get(col, col),
+                            x=avg_by_tier.index.tolist(),
+                            y=avg_by_tier[col].tolist(),
+                            marker_color=colors[i % len(colors)],
+                        ))
+                    fig.update_layout(**PLOTLY_BASE, height=350, barmode="group",
+                                      xaxis_title="Tier", yaxis_title="Avg Score")
+                    st.plotly_chart(fig, use_container_width=True)
+        except Exception as e:
+            st.error(f"Analytics tab error: {e}")
+
+    # ── Tab 3: Stock Drilldown ────────────────────────────────────────────
+    with tabs[2]:
+        try:
+            if cs_df.empty:
+                st.info("No data.")
             else:
-                mom = None
+                elite_df = cs_df[cs_df["composite_score"].fillna(0) >= 80] if "composite_score" in cs_df.columns else cs_df
+                tickers  = sorted(elite_df["ticker"].dropna().unique().tolist()) if "ticker" in elite_df.columns else []
 
-            # Trend arrows
-            if wow is not None:
-                if   wow >=  5: trend = "↑↑"
-                elif wow >=  1: trend = "↑"
-                elif wow <= -5: trend = "↓↓"
-                elif wow <= -1: trend = "↓"
-                else:           trend = "→"
+                if not tickers:
+                    st.info("No A/A+ stocks (composite score ≥ 80) found.")
+                else:
+                    sel_ticker = st.selectbox("Select ticker (A/A+ only)", options=tickers)
+                    row = elite_df[elite_df["ticker"] == sel_ticker]
+                    if row.empty:
+                        st.warning("No data.")
+                    else:
+                        r = row.iloc[0]
+                        tier  = str(r.get("tier", "?"))
+                        score = float(r.get("composite_score", 0))
+
+                        st.markdown(
+                            f"## {sel_ticker} &nbsp; {_tier_badge(tier)} &nbsp; "
+                            f"<span style='color:{C_GREY};'>Score: {score:.1f}</span>"
+                            f" &nbsp; <a href='https://www.tradingview.com/chart/?symbol={sel_ticker}' "
+                            f"target='_blank' style='font-size:0.75rem;color:{C_BLUE};'>📈 TradingView</a>",
+                            unsafe_allow_html=True,
+                        )
+
+                        m1, m2, m3, m4, m5 = st.columns(5)
+                        m1.metric("Composite",  f"{score:.1f}")
+                        m2.metric("RS Rating",  f"{r.get('rs_rating', '—')}")
+                        m3.metric("Pattern",    str(r.get("best_pattern", "—")))
+                        m4.metric("Trend ✓",    "✅" if bool(r.get("trend_template_pass", False)) else "❌")
+                        m5.metric("Squeeze",    "🔥" if bool(r.get("squeeze_fired", False)) else "No")
+
+                        st.markdown("---")
+                        col_tech, col_fund, col_pat = st.columns(3)
+
+                        with col_tech:
+                            st.markdown("**⚡ Technical**")
+                            st.write(f"Score: **{r.get('technical_score', '—')}**")
+                            st.write(f"RS Rating: **{r.get('rs_rating', '—')}**")
+                            st.write(f"Trend Template: {'✅' if bool(r.get('trend_template_pass', False)) else '❌'}")
+                            st.write(f"Squeeze: {'🔥 Fired' if bool(r.get('squeeze_fired', False)) else 'No'}")
+                            st.write(f"Pattern: **{r.get('best_pattern', '—')}**")
+
+                        with col_fund:
+                            st.markdown("**💼 Fundamental**")
+                            st.write(f"Score: **{r.get('fundamental_score', '—')}**")
+                            st.write(f"Market Score: **{r.get('market_score', '—')}**")
+                            st.caption("EPS/Revenue data not available in current export")
+
+                        with col_pat:
+                            st.markdown("**🔍 Pattern**")
+                            pat_row = pat_df[pat_df["ticker"] == sel_ticker] if not pat_df.empty and "ticker" in pat_df.columns else pd.DataFrame()
+                            if not pat_row.empty:
+                                pr = pat_row.iloc[0]
+                                st.write(f"VCP: {'✅' if bool(pr.get('vcp_found', False)) else '❌'}")
+                                st.write(f"VCP Contractions: **{pr.get('vcp_contractions', '—')}**")
+                                st.write(f"VCP Depth: **{pr.get('vcp_depth_pct', '—')}%**")
+                                st.write(f"Cup: {'✅' if bool(pr.get('cup_found', False)) else '❌'}")
+                                st.write(f"Double Bottom: {'✅' if bool(pr.get('double_bottom_found', False)) else '❌'}")
+                                st.write(f"Flat Base: {'✅' if bool(pr.get('flat_base_found', False)) else '❌'}")
+                            else:
+                                st.caption("No pattern data for this ticker")
+
+                        # Score components chart
+                        st.markdown("---")
+                        sub_scores = {
+                            "Technical": r.get("technical_score", 0),
+                            "Fundamental": r.get("fundamental_score", 0),
+                            "Pattern": r.get("pattern_score", 0),
+                            "Market": r.get("market_score", 0),
+                        }
+                        valid_sub = {k: float(v) for k,v in sub_scores.items() if v is not None and not pd.isna(v)}
+                        if valid_sub:
+                            fig = go.Figure(go.Bar(
+                                x=list(valid_sub.keys()),
+                                y=list(valid_sub.values()),
+                                marker_color=[C_BLUE, C_GREEN, C_YELLOW, "#a855f7"],
+                                text=[f"{v:.1f}" for v in valid_sub.values()],
+                                textposition="outside",
+                            ))
+                            fig.update_layout(**PLOTLY_BASE, height=300, showlegend=False,
+                                              yaxis=dict(range=[0,105]), yaxis_title="Score")
+                            st.plotly_chart(fig, use_container_width=True)
+        except Exception as e:
+            st.error(f"Drilldown tab error: {e}")
+
+    # ── Tab 4: Backtest ───────────────────────────────────────────────────
+    with tabs[3]:
+        try:
+            bt = load_canslim_backtest()
+            if bt is None:
+                st.info("No backtest data at data/canslim/backtest_results.json")
             else:
-                trend = "—"
-
-            rows.append({
-                "Sector":       display_name,
-                "% >200 SMA":  f"{a200:.1f}%" if a200 is not None and pd.notna(a200) else "—",
-                "% >50 SMA":   f"{a50:.1f}%"  if a50  is not None and pd.notna(a50)  else "—",
-                "WoW pp":       f"{wow:+.1f}" if wow is not None else "—",
-                "MoM pp (4W)":  f"{mom:+.1f}" if mom is not None else "—",
-                "52W Highs%":  f"{highs:.1f}%" if highs is not None and pd.notna(highs) else "—",
-                "52W Lows%":   f"{lows:.1f}%"  if lows  is not None and pd.notna(lows)  else "—",
-                "Trend":        trend,
-            })
-
-        sector_table = pd.DataFrame(rows)
-
-        def _wow_style(val):
-            try:
-                v = float(str(val).replace("+", "").replace("%", ""))
-                if v > 0: return f"color:{C_GREEN}"
-                if v < 0: return f"color:{C_RED}"
-            except Exception:
-                pass
-            return ""
-
-        def _trend_style(val):
-            if val in ("↑↑", "↑"): return f"color:{C_GREEN};font-weight:700"
-            if val in ("↓↓", "↓"): return f"color:{C_RED};font-weight:700"
-            return f"color:{C_GREY}"
-
-        styled_sector = (
-            sector_table.style
-            .map(_wow_style, subset=["WoW pp", "MoM pp (4W)"])
-            .map(_trend_style, subset=["Trend"])
-        )
-        st.dataframe(styled_sector, use_container_width=True, hide_index=True)
-
-    section_divider("Breadth Time Series")
-
-    metric_options = {
-        "above_50sma":  ("% >50 SMA",  C_BLUE),
-        "above_200sma": ("% >200 SMA", C_GREEN),
-        "new_52w_high": ("52W Highs%", C_YELLOW),
-        "new_52w_low":  ("52W Lows%",  C_RED),
-    }
-    sel_metrics = st.multiselect(
-        "Select metrics to display",
-        options=list(metric_options.keys()),
-        default=["above_50sma", "above_200sma"],
-        format_func=lambda x: metric_options[x][0],
-    )
-
-    if sel_metrics:
-        fig = go.Figure()
-        for m in sel_metrics:
-            label, color = metric_options[m]
-            plot_df = bdf.dropna(subset=[m])
-            fig.add_trace(go.Scatter(
-                x=plot_df["date"], y=plot_df[m],
-                name=label, mode="lines",
-                line=dict(color=color, width=2),
-                hovertemplate=f"<b>{label}</b><br>%{{x|%Y-%m-%d}}<br>%{{y:.1f}}%<extra></extra>",
-            ))
-        fig.add_hrect(y0=70, y1=100, fillcolor=C_GREEN, opacity=0.04, line_width=0)
-        fig.add_hrect(y0=0,  y1=30,  fillcolor=C_RED,   opacity=0.04, line_width=0)
-        fig.add_hline(y=70, line_dash="dot", line_color=C_GREEN, opacity=0.35,
-                      annotation_text="Bull (70%)")
-        fig.add_hline(y=30, line_dash="dot", line_color=C_RED, opacity=0.35,
-                      annotation_text="Bear (30%)")
-        fig.update_layout(
-            **PLOTLY_BASE,
-            title="S&P 500 Market Breadth — Weekly",
-            xaxis_title="Date", yaxis_title="Percentage (%)",
-            yaxis=dict(range=[0, 100]),
-        )
-        add_rangeselector(
-            fig, ["1M", "3M", "6M", "1Y", "All"],
-            default_range=["2024-01-01", bdf["date"].max().strftime("%Y-%m-%d")],
-        )
-        st.plotly_chart(fig, use_container_width=True)
-
-    section_divider("Sector Comparison Chart")
-
-    metric_choice = st.selectbox(
-        "Metric",
-        options=["above_200sma", "above_50sma", "new_52w_high", "new_52w_low"],
-        format_func=lambda x: metric_options[x][0],
-    )
-
-    if not sdf.empty:
-        palette11 = [
-            "#4f8ef7", "#22c55e", "#eab308", "#ef4444", "#a855f7",
-            "#06b6d4", "#f97316", "#ec4899", "#14b8a6", "#8b5cf6", "#84cc16",
-        ]
-        fig2 = go.Figure()
-        for i, sector in enumerate(sorted(sdf["sector"].unique())):
-            sdata = sdf[sdf["sector"] == sector].sort_values("date").dropna(subset=[metric_choice])
-            etf = SECTOR_ETF.get(sector, "")
-            label = f"{sector} ({etf})" if etf else sector
-            fig2.add_trace(go.Scatter(
-                x=sdata["date"], y=sdata[metric_choice],
-                name=label, mode="lines",
-                line=dict(color=palette11[i % len(palette11)], width=1.5),
-                hovertemplate=f"<b>{label}</b><br>%{{x|%Y-%m-%d}}<br>%{{y:.1f}}%<extra></extra>",
-            ))
-        fig2.update_layout(
-            **PLOTLY_BASE,
-            title=f"Sector Breadth — {metric_options[metric_choice][0]}",
-            xaxis_title="Date", yaxis_title="Percentage (%)",
-            yaxis=dict(range=[0, 100]),
-            legend=dict(orientation="v", x=1.02, y=1, font=dict(size=10)),
-        )
-        add_rangeselector(
-            fig2, ["1M", "3M", "6M", "1Y", "All"],
-            default_range=["2024-01-01", sdf["date"].max().strftime("%Y-%m-%d")],
-        )
-        st.plotly_chart(fig2, use_container_width=True)
-
-
-# ── Section 6: Market Risk Factors ────────────────────────────────────────────
-
-def render_risk_factors():
-    st.title("⚠️ Market Risk Factors")
-    st.markdown("15 macro risk factors — composite scoring (0–10) · green ≥7 · yellow 4–7 · red <4")
-
-    try:
-        factors = load_risk_factors()
-        ts_df   = load_risk_timeseries()
-    except Exception as e:
-        st.error(f"Failed to load risk factor data: {e}")
-        return
-
-    latest_ts = ts_df.iloc[-1]
-    score_20  = float(latest_ts["composite_20"])
-    score_50  = float(latest_ts["composite_50"])
-    sc20      = score_color(score_20)
-    sc50      = score_color(score_50)
-
-    section_divider("Composite Score Cards")
-
-    c1, c2, c3 = st.columns([1, 1, 2])
-    with c1:
-        st.markdown(
-            card_html("20-Day Composite", f"{score_20:.2f} / 10", sc20,
-                      f"{'Bullish' if score_20>=7 else 'Neutral' if score_20>=4 else 'Bearish'}",
-                      sc20),
-            unsafe_allow_html=True,
-        )
-    with c2:
-        st.markdown(
-            card_html("50-Day Composite", f"{score_50:.2f} / 10", sc50,
-                      f"{'Bullish' if score_50>=7 else 'Neutral' if score_50>=4 else 'Bearish'}",
-                      sc50),
-            unsafe_allow_html=True,
-        )
-    with c3:
-        greens  = sum(1 for f in factors if f.get("signal") == "green")
-        yellows = sum(1 for f in factors if f.get("signal") == "yellow")
-        reds    = sum(1 for f in factors if f.get("signal") == "red")
-        st.markdown(
-            f'<div style="background:{C_CARD};border-radius:10px;padding:16px 20px;margin:6px 0">'
-            f'<div style="color:{C_GREY};font-size:0.78em;text-transform:uppercase;letter-spacing:0.05em">Signal Summary — 15 Factors</div>'
-            f'<div style="margin-top:8px;font-size:1.1em">'
-            f'<span style="color:{C_GREEN};font-weight:700">● {greens} Green</span>&nbsp;&nbsp;'
-            f'<span style="color:{C_YELLOW};font-weight:700">● {yellows} Yellow</span>&nbsp;&nbsp;'
-            f'<span style="color:{C_RED};font-weight:700">● {reds} Red</span>'
-            f'</div>'
-            f'<div style="color:{C_GREY};font-size:0.8em;margin-top:6px">'
-            f'As of {ts_df.iloc[-1]["date"].strftime("%Y-%m-%d")}</div>'
-            f'</div>',
-            unsafe_allow_html=True,
-        )
-
-    section_divider("Composite Risk Score — Historical Trend (2017–Present)")
-
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=ts_df["date"], y=ts_df["composite_20"],
-        name="20-Day Composite", mode="lines",
-        line=dict(color=C_BLUE, width=2),
-        hovertemplate="<b>20-Day</b><br>%{x|%Y-%m-%d}<br>Score: %{y:.2f}<extra></extra>",
-    ))
-    fig.add_trace(go.Scatter(
-        x=ts_df["date"], y=ts_df["composite_50"],
-        name="50-Day Composite", mode="lines",
-        line=dict(color=C_GREEN, width=2, dash="dot"),
-        hovertemplate="<b>50-Day</b><br>%{x|%Y-%m-%d}<br>Score: %{y:.2f}<extra></extra>",
-    ))
-    fig.add_hrect(y0=7, y1=10, fillcolor=C_GREEN, opacity=0.05, line_width=0)
-    fig.add_hrect(y0=0,  y1=4,  fillcolor=C_RED,   opacity=0.05, line_width=0)
-    fig.add_hline(y=7, line_dash="dot", line_color=C_GREEN, opacity=0.4,
-                  annotation_text="Bullish ≥7")
-    fig.add_hline(y=4, line_dash="dot", line_color=C_RED, opacity=0.4,
-                  annotation_text="Bearish <4")
-    fig.update_layout(
-        **PLOTLY_BASE,
-        title="Composite Risk Scores — 20-Day & 50-Day",
-        xaxis_title="Date", yaxis_title="Composite Score (0–10)",
-        yaxis=dict(range=[0, 10]),
-    )
-    one_year_ago = (ts_df["date"].max() - pd.DateOffset(years=1)).strftime("%Y-%m-%d")
-    add_rangeselector(
-        fig, ["1Y", "3Y", "5Y", "All"],
-        default_range=[one_year_ago, ts_df["date"].max().strftime("%Y-%m-%d")],
-    )
-    st.plotly_chart(fig, use_container_width=True)
-
-    section_divider("Multi-Horizon Signal Grid — 15 Factors")
-
-    # Derive 3M signal: if signal == signal_50, use that; otherwise "mixed" (yellow)
-    grid_rows = []
-    for f in factors:
-        sig_1w  = f.get("signal", "—")
-        sig_50d = f.get("signal_50", "—")
-        # 3M: agree → same, disagree → yellow
-        if sig_1w == sig_50d and sig_1w in ("green", "yellow", "red"):
-            sig_3m = sig_1w
-        elif sig_1w in ("green", "yellow", "red") and sig_50d in ("green", "yellow", "red"):
-            sig_3m = "yellow"
-        else:
-            sig_3m = "—"
-        grid_rows.append({
-            "Factor":        f.get("factor_name", "Unknown"),
-            "Current (1W)":  sig_1w,
-            "50-Day (1M)":   sig_50d,
-            "3M (derived)":  sig_3m,
-            "Value":         f.get("display_value", "—"),
-        })
-
-    grid_df = pd.DataFrame(grid_rows)
-
-    def _sig_style(val):
-        v = str(val).lower()
-        if v == "green":  return f"background:{C_GREEN}25;color:{C_GREEN};font-weight:700"
-        if v == "yellow": return f"background:{C_YELLOW}25;color:{C_YELLOW};font-weight:700"
-        if v == "red":    return f"background:{C_RED}25;color:{C_RED};font-weight:700"
-        return f"color:{C_GREY}"
-
-    styled_grid = (
-        grid_df.style
-        .map(_sig_style, subset=["Current (1W)", "50-Day (1M)", "3M (derived)"])
-    )
-    st.dataframe(styled_grid, use_container_width=True, hide_index=True)
-    st.caption("3M column derived: matches 1W+50D signal if they agree, otherwise shows yellow (mixed).")
-
-    section_divider("Factor Detail Cards")
-
-    CPR = 3  # cards per row
-    for chunk_start in range(0, len(factors), CPR):
-        chunk = factors[chunk_start:chunk_start + CPR]
-        cols = st.columns(CPR)
-        for col, f in zip(cols, chunk):
-            with col:
-                sig  = f.get("signal", "")
-                sc   = sig_color(sig)
-                name = f.get("factor_name", "Unknown")
-                val  = f.get("display_value", "—")
-                txt  = f.get("text", "")
-                desc = f.get("description", "")
-                s50  = f.get("signal_50", "")
-                sc50_c = sig_color(s50)
-
+                period = bt.get("period", "N/A")
                 st.markdown(
-                    f'<div style="background:{C_CARD};border-left:3px solid {sc};'
-                    f'padding:12px 14px;border-radius:7px;margin-bottom:10px;min-height:120px">'
-                    f'<div style="font-weight:700;font-size:0.88em;color:#fff;'
-                    f'margin-bottom:4px">{name}</div>'
-                    f'<div style="font-size:1.3em;font-weight:800;color:{sc};'
-                    f'margin:3px 0">{val}</div>'
-                    f'<div style="margin:4px 0">'
-                    f'{badge_html(sig.upper() if sig else "—", sc, "0.72em")}'
-                    f'&nbsp;'
-                    f'<span style="color:{C_GREY};font-size:0.72em">50d: </span>'
-                    f'{badge_html(s50.upper() if s50 else "—", sc50_c, "0.72em")}'
-                    f'</div>'
-                    f'<div style="font-size:0.75em;color:#aaa;line-height:1.4;margin-top:5px">'
-                    f'{txt[:130]}{"…" if len(txt) > 130 else ""}'
-                    f'</div>'
-                    f'</div>',
+                    f"<div style='background:{C_CARD};border-left:4px solid {C_BLUE};"
+                    f"padding:10px 18px;border-radius:6px;margin-bottom:16px;'>"
+                    f"<span style='color:#e2e8f0;font-weight:700;'>📅 Backtest: {period}</span>"
+                    f"</div>",
                     unsafe_allow_html=True,
                 )
 
+                spy_ret  = float(bt.get("spy_return", 0) or 0)
+                strat_ret = float(bt.get("total_return", 0) or 0)
+                alpha    = strat_ret - spy_ret
 
-# ── Section 7: Smart Money ────────────────────────────────────────────────────
+                m1, m2, m3, m4, m5, m6 = st.columns(6)
+                m1.metric("Total Return",  f"{strat_ret:+.2f}%", delta=f"SPY {spy_ret:+.2f}%")
+                m2.metric("Ann. Return",   f"{bt.get('annualized_return', 0):+.2f}%")
+                m3.metric("Sharpe",        f"{bt.get('sharpe_ratio', 0):.2f}")
+                m4.metric("Max DD",        f"{bt.get('max_drawdown', 0):.2f}%")
+                m5.metric("Win Rate",      f"{bt.get('win_rate', 0):.1f}%")
+                m6.metric("# Trades",      str(bt.get("num_trades", 0)))
 
-def render_smart_money():
-    st.title("💰 Smart Money Flows")
-    st.markdown("Institutional positioning · Insider transactions · Fund movements")
+                st.markdown("---")
+                a1, a2 = st.columns(2)
+                with a1:
+                    st.metric("Avg Return/Trade", f"{bt.get('avg_return', 0):+.2f}%")
+                    st.metric("Avg Win",  f"{bt.get('avg_win', 0):+.2f}%")
+                    st.metric("Avg Loss", f"{bt.get('avg_loss', 0):+.2f}%")
+                with a2:
+                    st.metric("Best Trade",  f"{bt.get('best_trade', 0):+.2f}%")
+                    st.metric("Worst Trade", f"{bt.get('worst_trade', 0):+.2f}%")
+                    st.metric("Alpha",       f"{alpha:+.2f}%")
 
-    smart_dir = DATA_ROOT / "smart_money"
-    data_files = []
-    if smart_dir.exists():
-        data_files = (
-            list(smart_dir.glob("*.csv"))
-            + list(smart_dir.glob("*.parquet"))
-            + list(smart_dir.glob("*.json"))
-        )
+                trades = bt.get("trades")
+                if trades:
+                    st.markdown("---")
+                    trades_df = pd.DataFrame(trades)
+                    for dc in ["entry_date","exit_date"]:
+                        if dc in trades_df.columns:
+                            trades_df[dc] = pd.to_datetime(trades_df[dc], errors="coerce")
+                    if "entry_date" in trades_df.columns and "exit_date" in trades_df.columns:
+                        trades_df["holding_days"] = (trades_df["exit_date"] - trades_df["entry_date"]).dt.days.fillna(0).astype(int)
 
-    if not data_files:
-        st.markdown(
-            f'<div style="background:{C_CARD};border:1px dashed {C_BLUE};'
-            f'border-radius:12px;padding:48px 32px;text-align:center;margin:20px 0">'
-            f'<div style="font-size:2.5em;margin-bottom:12px">📋</div>'
-            f'<div style="font-size:1.2em;font-weight:700;color:#fff;margin-bottom:8px">'
-            f'Insider Pipeline Scheduled — Data Loads Next Run</div>'
-            f'<div style="color:{C_GREY};max-width:480px;margin:0 auto;line-height:1.6">'
-            f'Institutional flow tracking and insider transaction analysis will '
-            f'appear here once the data pipeline runs. Expected data includes '
-            f'SEC Form 4 filings, 13F changes, and unusual options activity.</div>'
-            f'<div style="margin-top:20px">'
-            f'{badge_html("Top Insider Buys", C_BLUE, "0.85em")}&nbsp;'
-            f'{badge_html("Fund Movements", C_GREEN, "0.85em")}&nbsp;'
-            f'{badge_html("Options Flow", C_YELLOW, "0.85em")}'
-            f'</div>'
-            f'</div>',
-            unsafe_allow_html=True,
-        )
+                    st.subheader(f"Trades ({len(trades_df)})")
 
-        col1, col2 = st.columns(2)
-        with col1:
-            st.subheader("Planned: Top Insider Buys")
-            st.dataframe(
-                pd.DataFrame({
-                    "Ticker":      ["—", "—", "—"],
-                    "Insider":     ["—", "—", "—"],
-                    "Transaction": ["Purchase", "Purchase", "Purchase"],
-                    "Value ($M)":  ["—", "—", "—"],
-                    "Date":        ["—", "—", "—"],
-                }),
-                hide_index=True,
-            )
-        with col2:
-            st.subheader("Planned: Fund Movements (13F Changes)")
-            st.dataframe(
-                pd.DataFrame({
-                    "Fund":    ["—", "—", "—"],
-                    "Action":  ["New Position", "Increase", "Decrease"],
-                    "Ticker":  ["—", "—", "—"],
-                    "Shares":  ["—", "—", "—"],
-                    "Value":   ["—", "—", "—"],
-                }),
-                hide_index=True,
-            )
-    else:
-        st.success(f"Data available — {len(data_files)} file(s) loaded")
-        for fp in sorted(data_files):
-            try:
-                if fp.suffix == ".csv":
-                    fdf = pd.read_csv(fp)
-                elif fp.suffix == ".parquet":
-                    fdf = pd.read_parquet(fp)
-                elif fp.suffix == ".json":
-                    with open(fp) as f:
-                        fdf = pd.DataFrame(json.load(f))
-                else:
-                    continue
-                st.subheader(fp.stem.replace("_", " ").title())
-                st.dataframe(fdf, use_container_width=True, hide_index=True)
-            except Exception as e:
-                st.error(f"Could not load {fp.name}: {e}")
+                    if "return_pct" in trades_df.columns:
+                        fig = go.Figure(go.Histogram(
+                            x=trades_df["return_pct"], nbinsx=30,
+                            marker_color=[C_GREEN if v > 0 else C_RED for v in trades_df["return_pct"]],
+                        ))
+                        fig.update_layout(**PLOTLY_BASE, height=250,
+                                          xaxis_title="Return %", yaxis_title="Count",
+                                          title="Return Distribution")
+                        st.plotly_chart(fig, use_container_width=True)
+
+                    show_cols = [c for c in ["ticker","entry_date","exit_date","holding_days",
+                                             "entry_price","exit_price","return_pct","exit_reason"]
+                                 if c in trades_df.columns]
+                    disp_trades = trades_df[show_cols].copy()
+                    if "return_pct" in disp_trades.columns:
+                        disp_trades = disp_trades.sort_values("return_pct", ascending=False)
+
+                    def _ret_color(val):
+                        try:
+                            return f"color: {C_GREEN}" if float(val) > 0 else f"color: {C_RED}"
+                        except Exception:
+                            return ""
+
+                    styled_trades = disp_trades.style
+                    if "return_pct" in disp_trades.columns:
+                        styled_trades = styled_trades.applymap(_ret_color, subset=["return_pct"])
+                    st.dataframe(styled_trades, use_container_width=True, hide_index=True)
+        except Exception as e:
+            st.error(f"Backtest tab error: {e}")
+
+    # ── Tab 5: About ──────────────────────────────────────────────────────
+    with tabs[4]:
+        st.markdown("""
+## CAN SLIM + SEPA/VCP Methodology
+
+**CAN SLIM** (William O'Neil / IBD) ranks growth stocks by combining fundamental quality with technical setup strength.
+
+**SEPA/VCP** (Mark Minervini) identifies Volatility Contraction Patterns — price consolidations showing decreasing depth and volume before potential breakouts.
+
+### Trend Template (8 criteria, all must pass)
+1. Price > 200-day SMA
+2. 200-day SMA trending up (past 20 bars)
+3. 150-day SMA > 200-day SMA
+4. Price > 150-day SMA
+5. Price > 50-day SMA
+6. 50-day SMA > 150-day SMA
+7. Price within 25% of 52-week high
+8. Price > 30% above 52-week low
+
+### Pattern Types
+| Pattern | Quality | What to look for |
+|---------|---------|-----------------|
+| VCP | ★★★★★ | Shrinking price swings; volume dry-up |
+| Cup with Handle | ★★★★★ | U-shape 12–33% deep; handle = shallow pullback |
+| Double Bottom | ★★★★ | W-shape; pivot = middle peak |
+| Flat Base | ★★★ | < 15% depth; quiet institutional accumulation |
+
+### Composite Score Weights
+- Technical (30%): RS Rating, trend template, 52W proximity, volume
+- Fundamental (30%): EPS growth, revenue growth, ROE, institutional ownership
+- Pattern (25%): Pattern type, base depth, volume dry-up
+- Market Context (15%): Market regime, sector rank, breadth
+
+### Tier System
+| Tier | Score | Action |
+|------|-------|--------|
+| A+ | 90–100 | Best setup — watch for entry trigger |
+| A | 80–89 | Strong — buy on volume surge |
+| B | 65–79 | Monitor — not yet actionable |
+| C | 50–64 | Early — wait |
+| D | < 50 | Pass |
+""")
 
 
-# ── Navigation ────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# CRYPTO SECTION
+# ══════════════════════════════════════════════════════════════════════════════
 
-PAGES = {
-    "📊 Overview":           render_overview,
-    "🤖 ML Signals":          render_ml_signals,
-    "📈 CAN SLIM / SEPA":     render_canslim,
-    "🪙 Crypto":              render_crypto,
-    "🌊 S&P 500 Breadth":     render_breadth,
-    "⚠️ Market Risk Factors": render_risk_factors,
-    "💰 Smart Money":         render_smart_money,
-}
+elif section == "🪙 Crypto":
+    st.title("🪙 Crypto Analyzer")
 
-
-def main():
-    # ── Sidebar ──
-    with st.sidebar:
-        st.markdown(
-            f'<div style="padding:10px 0 4px;font-size:1.1em;font-weight:700;'
-            f'color:#fff">Market Intelligence Hub</div>'
-            f'<div style="color:{C_GREY};font-size:0.75em;margin-bottom:16px">'
-            f'Powered by Streamlit Cloud</div>',
-            unsafe_allow_html=True,
-        )
-
-        selection = st.radio(
-            "Navigate",
-            options=list(PAGES.keys()),
-            label_visibility="collapsed",
-        )
-
-        st.markdown("---")
-        st.markdown(
-            f'<div style="color:{C_GREY};font-size:0.72em;line-height:1.6">'
-            f'Data cached: 1h TTL<br>'
-            f'Refreshed: {datetime.now().strftime("%Y-%m-%d %H:%M")}'
-            f'</div>',
-            unsafe_allow_html=True,
-        )
-
-    # ── Main content ──
     try:
-        PAGES[selection]()
+        cr_df = load_crypto()
     except Exception as e:
-        st.error(f"Error rendering section: {e}")
-        st.exception(e)
+        st.error(f"Failed to load crypto data: {e}")
+        cr_df = pd.DataFrame()
+
+    def _clean_sym(s):
+        return str(s).replace("/USDT","").replace("/BTC","").strip()
+
+    # Filter to latest run_date
+    cr_latest = pd.DataFrame()
+    if not cr_df.empty and "run_date" in cr_df.columns:
+        latest_rd = cr_df["run_date"].max()
+        cr_latest = cr_df[cr_df["run_date"] == latest_rd].copy()
+        if "Symbol" in cr_latest.columns:
+            cr_latest["Symbol_clean"] = cr_latest["Symbol"].apply(_clean_sym)
+        if "Rank" not in cr_latest.columns and "Composite" in cr_latest.columns:
+            cr_latest = cr_latest.sort_values("Composite", ascending=False).reset_index(drop=True)
+            cr_latest["Rank"] = range(1, len(cr_latest)+1)
+
+    tabs = st.tabs([
+        "🏆 Rankings",
+        "📡 RRG Chart",
+        "🌡️ Heatmap",
+        "📈 History",
+        "🔍 Asset Detail",
+        "📖 About",
+    ])
+
+    # ── Tab 1: Rankings ───────────────────────────────────────────────────
+    with tabs[0]:
+        try:
+            if cr_latest.empty:
+                st.warning("No crypto data at data/crypto/history.parquet")
+            else:
+                latest_rd_str = str(latest_rd)[:10] if not cr_df.empty else "—"
+                st.caption(f"Run date: **{latest_rd_str}** · {len(cr_latest)} assets")
+
+                # Header metrics
+                if len(cr_latest):
+                    top = cr_latest.sort_values("Composite", ascending=False).iloc[0] if "Composite" in cr_latest.columns else cr_latest.iloc[0]
+                    top_sym = _clean_sym(top.get("Symbol", "?"))
+                    leaders = cr_latest[cr_latest["RRG Regime"].str.lower() == "leading"]["Symbol"].apply(_clean_sym).tolist() if "RRG Regime" in cr_latest.columns else []
+                    h1, h2, h3 = st.columns(3)
+                    h1.metric("Top Composite", f"{top_sym} — {top.get('Composite', 0):.1f}")
+                    h2.metric("Leading",  f"{len(leaders)} assets")
+                    h3.metric("Total",    f"{len(cr_latest)} assets")
+
+                st.markdown("---")
+
+                disp_cols = [c for c in ["Rank","Symbol","Composite","Tier","RS Score","Tech Score",
+                                          "Fund Score","RRG Regime","RS %ile","RS Momentum",
+                                          "RS Breakout","Golden ✕","Death ✕"]
+                             if c in cr_latest.columns]
+                disp = cr_latest[disp_cols].copy()
+                if "Symbol" in disp.columns:
+                    disp["Symbol"] = disp["Symbol"].apply(_clean_sym)
+                if "RRG Regime" in disp.columns:
+                    disp["RRG Regime"] = disp["RRG Regime"].apply(lambda r: RRG_BADGE.get(str(r).lower(), r))
+
+                def _tier_rrg_color(val):
+                    col = RRG_COLOR.get(str(val).lower().split()[-1].strip("🟢🔵🟡🔴"), "")
+                    return f"color: {col}; font-weight: bold" if col else ""
+
+                styled = disp.style
+                for fmt_col in ["Composite","RS Score","Tech Score","Fund Score","RS %ile"]:
+                    if fmt_col in disp.columns:
+                        styled = styled.format({fmt_col: "{:.1f}"}, na_rep="—")
+                st.dataframe(styled, use_container_width=True, hide_index=True,
+                             height=min(700, 40+36*len(disp)))
+        except Exception as e:
+            st.error(f"Rankings tab error: {e}")
+
+    # ── Tab 2: RRG Chart ──────────────────────────────────────────────────
+    with tabs[1]:
+        try:
+            if cr_latest.empty:
+                st.info("No data.")
+            elif "RS Momentum" not in cr_latest.columns or "RS Score" not in cr_latest.columns:
+                st.info("RS Momentum or RS Score columns not found.")
+            else:
+                plot_df = cr_latest.copy()
+                plot_df["x"] = pd.to_numeric(plot_df["RS Score"], errors="coerce")
+                plot_df["y"] = pd.to_numeric(plot_df["RS Momentum"], errors="coerce") - 50
+                plot_df["sym_clean"] = plot_df["Symbol"].apply(_clean_sym)
+                plot_df["regime"] = plot_df["RRG Regime"].str.lower() if "RRG Regime" in plot_df.columns else "lagging"
+
+                fig = go.Figure()
+
+                # Quadrant shading
+                for x0,x1,y0,y1,col in [
+                    (50,100,0,55,"rgba(34,197,94,0.07)"),
+                    (0,50,0,55,"rgba(59,130,246,0.07)"),
+                    (50,100,-55,0,"rgba(234,179,8,0.07)"),
+                    (0,50,-55,0,"rgba(239,68,68,0.07)"),
+                ]:
+                    fig.add_shape(type="rect", x0=x0,x1=x1,y0=y0,y1=y1, fillcolor=col, line_width=0)
+
+                for lbl,x,y in [("🟢 LEADING",75,45),("🔵 IMPROVING",25,45),("🟡 WEAKENING",75,-45),("🔴 LAGGING",25,-45)]:
+                    fig.add_annotation(x=x,y=y,text=lbl,showarrow=False, font=dict(size=11,color="rgba(200,200,200,0.4)"))
+
+                fig.add_shape(type="line",x0=50,x1=50,y0=-55,y1=55,line=dict(color="rgba(255,255,255,0.2)",width=1,dash="dash"))
+                fig.add_shape(type="line",x0=0,x1=100,y0=0,y1=0,line=dict(color="rgba(255,255,255,0.2)",width=1,dash="dash"))
+
+                for regime_key in ["leading","improving","weakening","lagging"]:
+                    subset = plot_df[plot_df["regime"] == regime_key].dropna(subset=["x","y"])
+                    if subset.empty:
+                        continue
+                    fig.add_trace(go.Scatter(
+                        x=subset["x"], y=subset["y"],
+                        mode="markers+text",
+                        name=RRG_BADGE.get(regime_key, regime_key),
+                        text=subset["sym_clean"],
+                        textposition="top center",
+                        textfont=dict(size=10),
+                        marker=dict(
+                            size=14, color=RRG_COLOR[regime_key], opacity=0.85,
+                            line=dict(width=1,color="rgba(0,0,0,0.3)"),
+                        ),
+                        hovertemplate="<b>%{text}</b><br>RS Score: %{x:.1f}<br>RS Momentum offset: %{y:.1f}<extra></extra>",
+                    ))
+
+                fig.update_layout(
+                    **PLOTLY_BASE, height=560,
+                    xaxis=dict(title="RS Score", range=[0,100]),
+                    yaxis=dict(title="RS Momentum (offset from 50)", range=[-55,55]),
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
+                r1, r2 = st.columns(2)
+                with r1:
+                    st.success("🟢 **LEADING** — Outperforming BTC, gaining momentum. Strongest buy signal.")
+                    st.info("🔵 **IMPROVING** — Starting to outperform. Early entry opportunity.")
+                with r2:
+                    st.warning("🟡 **WEAKENING** — Was leading, losing momentum. Reduce exposure.")
+                    st.error("🔴 **LAGGING** — Underperforming BTC. Avoid.")
+        except Exception as e:
+            st.error(f"RRG tab error: {e}")
+
+    # ── Tab 3: Heatmap ────────────────────────────────────────────────────
+    with tabs[2]:
+        try:
+            if cr_latest.empty:
+                st.info("No data.")
+            else:
+                score_cols = [c for c in ["RS Score","Tech Score","Fund Score","Composite"] if c in cr_latest.columns]
+                if not score_cols:
+                    st.info("No score columns found.")
+                else:
+                    hm_df = cr_latest.copy()
+                    if "Symbol" in hm_df.columns:
+                        hm_df = hm_df.sort_values("Composite", ascending=True) if "Composite" in hm_df.columns else hm_df
+                        hm_df["sym_clean"] = hm_df["Symbol"].apply(_clean_sym)
+                    z_data = hm_df[[c for c in score_cols if c in hm_df.columns]].values
+                    syms   = hm_df["sym_clean"].tolist() if "sym_clean" in hm_df.columns else hm_df.index.tolist()
+
+                    fig = go.Figure(go.Heatmap(
+                        z=z_data,
+                        x=score_cols,
+                        y=syms,
+                        colorscale=[[0,C_RED],[0.4,C_YELLOW],[0.7,C_GREEN],[1,"#15803d"]],
+                        zmin=0, zmax=100,
+                        text=[[f"{v:.0f}" if not pd.isna(v) else "" for v in row] for row in z_data],
+                        texttemplate="%{text}",
+                        hovertemplate="Symbol: %{y}<br>Metric: %{x}<br>Score: %{z:.1f}<extra></extra>",
+                    ))
+                    fig.update_layout(**PLOTLY_BASE, height=max(350,22*len(syms)),
+                                      margin=dict(l=80,r=20,t=40,b=60))
+                    st.plotly_chart(fig, use_container_width=True)
+        except Exception as e:
+            st.error(f"Heatmap tab error: {e}")
+
+    # ── Tab 4: History ────────────────────────────────────────────────────
+    with tabs[3]:
+        try:
+            if cr_df.empty:
+                st.info("No data.")
+            else:
+                run_dates = sorted(cr_df["run_date"].dropna().unique()) if "run_date" in cr_df.columns else []
+                if len(run_dates) < 2:
+                    d = run_dates[0] if run_dates else "?"
+                    st.info(f"Data since {str(d)[:10]}. Need 2+ run dates for trend charts.")
+                    st.dataframe(cr_latest, use_container_width=True)
+                else:
+                    hist = cr_df.copy()
+                    if "Symbol" in hist.columns:
+                        hist["sym_clean"] = hist["Symbol"].apply(_clean_sym)
+
+                    # Top 10 by latest composite
+                    top10 = cr_latest.sort_values("Composite", ascending=False)["sym_clean"].head(10).tolist() if "sym_clean" in cr_latest.columns else []
+                    sel = st.multiselect("Filter assets", sorted(hist["sym_clean"].unique()) if "sym_clean" in hist.columns else [], default=top10)
+
+                    plot_hist = hist[hist["sym_clean"].isin(sel)] if sel and "sym_clean" in hist.columns else hist
+                    if "Composite" in plot_hist.columns:
+                        fig = px.line(
+                            plot_hist.sort_values("run_date"),
+                            x="run_date", y="Composite", color="sym_clean",
+                            markers=True,
+                            labels={"run_date":"Date","Composite":"Composite Score","sym_clean":"Symbol"},
+                        )
+                        fig.update_layout(**PLOTLY_BASE, height=420, yaxis=dict(range=[0,100]))
+                        st.plotly_chart(fig, use_container_width=True)
+        except Exception as e:
+            st.error(f"History tab error: {e}")
+
+    # ── Tab 5: Asset Detail ───────────────────────────────────────────────
+    with tabs[4]:
+        try:
+            if cr_latest.empty:
+                st.info("No data.")
+            else:
+                syms = [_clean_sym(s) for s in cr_latest["Symbol"].tolist()] if "Symbol" in cr_latest.columns else []
+                sel_sym = st.selectbox("Select asset", syms)
+
+                row = cr_latest[cr_latest["Symbol"].apply(_clean_sym) == sel_sym]
+                if row.empty:
+                    st.warning("Not found.")
+                else:
+                    r = row.iloc[0]
+                    regime = str(r.get("RRG Regime","lagging")).lower()
+                    comp   = float(r.get("Composite",0) or 0)
+
+                    m1, m2, m3 = st.columns(3)
+                    with m1:
+                        st.metric("RS Score",  f"{r.get('RS Score',0):.1f}")
+                        st.markdown(RRG_BADGE.get(regime, regime))
+                        st.metric("RS %ile",   f"{r.get('RS %ile',0):.1f}%")
+                    with m2:
+                        st.metric("Tech Score", f"{r.get('Tech Score',0):.1f}")
+                        if r.get("Golden ✕") == "✓":
+                            st.success("Golden Cross ✓")
+                        if r.get("Death ✕") == "✓":
+                            st.error("Death Cross ✗")
+                    with m3:
+                        st.metric("Fund Score", f"{r.get('Fund Score',0):.1f}")
+                        st.metric("Composite",  f"{comp:.1f}")
+
+                    st.markdown("---")
+                    score_labels = ["RS Score","Tech Score","Fund Score","Composite"]
+                    score_vals   = [float(r.get(c,0) or 0) for c in score_labels]
+                    fig = go.Figure(go.Bar(
+                        x=score_labels, y=score_vals,
+                        marker_color=[C_BLUE,"#8b5cf6",C_GREEN,C_YELLOW],
+                        text=[f"{v:.1f}" for v in score_vals], textposition="outside",
+                    ))
+                    fig.update_layout(**PLOTLY_BASE, height=300, showlegend=False,
+                                      yaxis=dict(range=[0,115]))
+                    st.plotly_chart(fig, use_container_width=True)
+
+                    # Historical trend for asset
+                    if not cr_df.empty and "Symbol" in cr_df.columns:
+                        asset_hist = cr_df[cr_df["Symbol"].apply(_clean_sym) == sel_sym].sort_values("run_date")
+                        if len(asset_hist) >= 2 and "Composite" in asset_hist.columns:
+                            st.markdown("#### Historical Score Trend")
+                            fig2 = px.line(asset_hist, x="run_date", y="Composite", markers=True)
+                            fig2.update_layout(**PLOTLY_BASE, height=300, yaxis=dict(range=[0,100]))
+                            st.plotly_chart(fig2, use_container_width=True)
+        except Exception as e:
+            st.error(f"Asset detail tab error: {e}")
+
+    # ── Tab 6: About ──────────────────────────────────────────────────────
+    with tabs[5]:
+        st.markdown("""
+## Crypto Analyzer Methodology
+
+A systematic ranking of top cryptocurrencies by market cap using three evidence-based pillars.
+
+### Three Pillars
+| Pillar | Weight | What We Measure |
+|--------|--------|----------------|
+| RS vs BTC | 30% | Altcoin/BTC ratio, RS trend, momentum, percentile |
+| Technical Health | 25% | Price vs 50/200 SMA, golden/death cross, volume |
+| Fundamentals | 45% | TVL growth, protocol fees, tokenomics, utility |
+
+### RRG Chart Guide
+| Quadrant | Meaning | Action |
+|----------|---------|--------|
+| 🟢 LEADING | High RS + positive momentum | Buy/Hold |
+| 🔵 IMPROVING | Low RS + rising momentum | Watch/Build |
+| 🟡 WEAKENING | High RS + slowing momentum | Reduce/Stop |
+| 🔴 LAGGING | Low RS + falling momentum | Avoid |
+
+**Rotation path**: Coins typically rotate clockwise. Best entry: LAGGING → IMPROVING.
+
+### Score Guide
+| Score | Grade | Meaning |
+|-------|-------|---------|
+| 80–100 | A | Strongest conviction |
+| 65–79 | B | Good across most pillars |
+| 50–64 | C | Mixed signals |
+| < 50 | D/F | Avoid |
+
+Data sources: Binance → Kraken → OKX (CCXT), CoinGecko, DeFiLlama.
+""")
 
 
-if __name__ == "__main__":
-    main()
+# ══════════════════════════════════════════════════════════════════════════════
+# S&P BREADTH SECTION
+# ══════════════════════════════════════════════════════════════════════════════
+
+elif section == "📊 S&P Breadth":
+    st.title("📊 S&P 500 Market Breadth")
+
+    try:
+        idx_df = load_breadth_index()
+        sec_df = load_breadth_sector()
+    except Exception as e:
+        st.error(f"Failed to load breadth data: {e}")
+        idx_df = pd.DataFrame()
+        sec_df = pd.DataFrame()
+
+    def _get_regime(pct200: float) -> tuple[str,str]:
+        if pct200 > 70:  return "🟢 BULL — Broad participation", C_GREEN
+        if pct200 > 50:  return "🟡 MIXED — Selective market", C_YELLOW
+        if pct200 > 30:  return "🟠 CAUTION — Weak breadth", "#f97316"
+        return "🔴 BEAR — Broad deterioration", C_RED
+
+    tabs = st.tabs([
+        "📊 Dashboard",
+        "🌡️ Heatmaps",
+        "📈 Time Series",
+        "🏭 Sectors",
+        "📖 About",
+    ])
+
+    # ── Tab 1: Dashboard ──────────────────────────────────────────────────
+    with tabs[0]:
+        try:
+            if idx_df.empty:
+                st.warning("No breadth data at data/breadth/breadth_index_weekly_with_wow.csv")
+            else:
+                latest_row = idx_df.iloc[-1]
+                pct200 = float(latest_row.get("above_200sma", 0))
+                pct50  = float(latest_row.get("above_50sma", 0))
+                h52    = float(latest_row.get("new_52w_high", 0))
+                l52    = float(latest_row.get("new_52w_low", 0))
+                wow200 = float(latest_row.get("above_200sma_wow", 0) or 0)
+                wow50  = float(latest_row.get("above_50sma_wow", 0) or 0)
+                wowh   = float(latest_row.get("new_52w_high_wow", 0) or 0)
+                wowl   = float(latest_row.get("new_52w_low_wow", 0) or 0)
+                regime_label, regime_col = _get_regime(pct200)
+
+                st.markdown(
+                    f"<div style='background:{regime_col}22;border:2px solid {regime_col}66;"
+                    f"border-radius:10px;padding:12px 20px;display:inline-block;margin-bottom:16px;'>"
+                    f"<span style='color:{regime_col};font-size:1.3em;font-weight:800;'>{regime_label}</span>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("% >200 SMA", f"{pct200:.1f}%", delta=f"{wow200:+.1f}pp WoW")
+                m2.metric("% >50 SMA",  f"{pct50:.1f}%",  delta=f"{wow50:+.1f}pp WoW")
+                m3.metric("52W Highs",  f"{h52:.0f}",     delta=f"{wowh:+.0f} WoW")
+                m4.metric("52W Lows",   f"{l52:.0f}",     delta=f"{wowl:+.0f} WoW", delta_color="inverse")
+
+                # Sector table
+                if not sec_df.empty:
+                    st.markdown("---")
+                    st.subheader("Sector Breadth")
+                    latest_sec = sec_df.groupby("sector").last().reset_index()
+
+                    # Compute MoM (4-week) if enough data
+                    sec_4w = None
+                    if len(sec_df["date"].unique()) >= 4:
+                        cutoff_date = idx_df["date"].max() - pd.Timedelta(weeks=4)
+                        old_sec = sec_df[sec_df["date"] <= cutoff_date].groupby("sector").last().reset_index()
+                        sec_4w = old_sec.set_index("sector")["above_200sma"].rename("pct200_4w")
+
+                    sector_rows = []
+                    for _, sr in latest_sec.iterrows():
+                        sname = sr["sector"]
+                        etf   = SECTOR_ETF.get(sname, "")
+                        p200  = float(sr.get("above_200sma", 0) or 0)
+                        p50   = float(sr.get("above_50sma",  0) or 0)
+                        h_pct = float(sr.get("new_52w_high", 0) or 0)
+
+                        # WoW
+                        sec_hist = sec_df[sec_df["sector"] == sname].sort_values("date")
+                        wow_200  = float(sr.get("above_200sma_wow", 0) or 0) if "above_200sma_wow" in sr.index else (
+                            p200 - float(sec_hist.iloc[-2]["above_200sma"]) if len(sec_hist) >= 2 else 0
+                        )
+                        # MoM
+                        mom_200 = None
+                        if sec_4w is not None and sname in sec_4w.index:
+                            mom_200 = p200 - float(sec_4w[sname])
+
+                        # Trend arrow
+                        if wow_200 > 3:   trend = "↑↑"
+                        elif wow_200 > 0: trend = "↑"
+                        elif wow_200 == 0: trend = "→"
+                        elif wow_200 > -3: trend = "↓"
+                        else:             trend = "↓↓"
+
+                        sector_rows.append({
+                            "Sector": f"{sname} ({etf})" if etf else sname,
+                            "%>200SMA": f"{p200:.1f}%",
+                            "%>50SMA":  f"{p50:.1f}%",
+                            "WoW pp":   f"{wow_200:+.1f}",
+                            "MoM pp":   f"{mom_200:+.1f}" if mom_200 is not None else "—",
+                            "52W Highs%": f"{h_pct:.1f}%",
+                            "Trend":    trend,
+                        })
+
+                    sec_tbl = pd.DataFrame(sector_rows)
+                    st.dataframe(sec_tbl, use_container_width=True, hide_index=True)
+
+                    # Leading / Lagging tiles
+                    st.markdown("---")
+                    st.subheader("Leading vs Lagging Sectors")
+                    raw_sec = latest_sec.copy()
+                    raw_sec["pct200"] = pd.to_numeric(raw_sec["above_200sma"], errors="coerce").fillna(0)
+                    raw_sec = raw_sec.sort_values("pct200", ascending=False)
+                    top3    = raw_sec.head(3)
+                    bot3    = raw_sec.tail(3)
+
+                    lead_cols = st.columns(3)
+                    for i, (_, sr) in enumerate(top3.iterrows()):
+                        with lead_cols[i]:
+                            st.markdown(
+                                f"<div style='background:{C_GREEN}22;border:1px solid {C_GREEN}55;"
+                                f"border-radius:8px;padding:10px;text-align:center;'>"
+                                f"<div style='color:{C_GREEN};font-weight:700;font-size:0.85rem;'>{sr['sector']}</div>"
+                                f"<div style='color:{C_GREEN};font-size:1.4em;font-weight:800;'>{sr['pct200']:.1f}%</div>"
+                                f"<div style='color:{C_GREY};font-size:0.75rem;'>above 200 SMA</div>"
+                                f"</div>",
+                                unsafe_allow_html=True,
+                            )
+
+                    lag_cols = st.columns(3)
+                    for i, (_, sr) in enumerate(bot3.iterrows()):
+                        with lag_cols[i]:
+                            st.markdown(
+                                f"<div style='background:{C_RED}22;border:1px solid {C_RED}55;"
+                                f"border-radius:8px;padding:10px;text-align:center;'>"
+                                f"<div style='color:{C_RED};font-weight:700;font-size:0.85rem;'>{sr['sector']}</div>"
+                                f"<div style='color:{C_RED};font-size:1.4em;font-weight:800;'>{sr['pct200']:.1f}%</div>"
+                                f"<div style='color:{C_GREY};font-size:0.75rem;'>above 200 SMA</div>"
+                                f"</div>",
+                                unsafe_allow_html=True,
+                            )
+        except Exception as e:
+            st.error(f"Dashboard tab error: {e}")
+
+    # ── Tab 2: Heatmaps ───────────────────────────────────────────────────
+    with tabs[1]:
+        try:
+            if sec_df.empty:
+                st.info("No sector data.")
+            else:
+                latest_sec = sec_df.groupby("sector").last().reset_index()
+                metrics = [c for c in ["above_50sma","above_200sma","new_52w_high","new_52w_low"] if c in latest_sec.columns]
+                if not metrics:
+                    st.info("No metric columns found.")
+                else:
+                    labels = {"above_50sma":">50SMA","above_200sma":">200SMA","new_52w_high":"52W High","new_52w_low":"52W Low"}
+                    z_data  = latest_sec[metrics].values
+                    sectors = latest_sec["sector"].tolist()
+                    x_labels = [labels.get(m,m) for m in metrics]
+
+                    fig = go.Figure(go.Heatmap(
+                        z=z_data, x=x_labels, y=sectors,
+                        colorscale=[[0,C_RED],[0.5,C_YELLOW],[1,C_GREEN]],
+                        text=[[f"{v:.1f}%" if not pd.isna(v) else "" for v in row] for row in z_data],
+                        texttemplate="%{text}",
+                        hovertemplate="Sector: %{y}<br>Metric: %{x}<br>Value: %{z:.1f}%<extra></extra>",
+                    ))
+                    fig.update_layout(**PLOTLY_BASE, height=450, margin=dict(l=150,r=20,t=40,b=60))
+                    st.plotly_chart(fig, use_container_width=True)
+        except Exception as e:
+            st.error(f"Heatmap tab error: {e}")
+
+    # ── Tab 3: Time Series ────────────────────────────────────────────────
+    with tabs[2]:
+        try:
+            if idx_df.empty:
+                st.info("No breadth index data.")
+            else:
+                metrics_ts = [c for c in ["above_50sma","above_200sma"] if c in idx_df.columns]
+                if metrics_ts:
+                    fig = go.Figure()
+                    colors_ts = {
+                        "above_50sma":  C_YELLOW,
+                        "above_200sma": C_GREEN,
+                    }
+                    labels_ts = {"above_50sma":"% >50 SMA","above_200sma":"% >200 SMA"}
+                    for m in metrics_ts:
+                        fig.add_trace(go.Scatter(
+                            x=idx_df["date"], y=idx_df[m],
+                            mode="lines", name=labels_ts.get(m,m),
+                            line=dict(color=colors_ts.get(m,C_BLUE)),
+                            hovertemplate="%{x|%Y-%m-%d}<br>%{y:.1f}%<extra></extra>",
+                        ))
+                    fig.add_hline(y=70, line_dash="dot", line_color=C_GREEN, opacity=0.5, annotation_text="Bull threshold")
+                    fig.add_hline(y=50, line_dash="dot", line_color=C_YELLOW, opacity=0.5, annotation_text="Neutral")
+                    fig.add_hline(y=30, line_dash="dot", line_color=C_RED, opacity=0.5, annotation_text="Bear threshold")
+                    fig.update_layout(
+                        **PLOTLY_BASE, height=450,
+                        xaxis=dict(rangeselector=_rangeselector(), rangeslider=dict(visible=False)),
+                        yaxis=dict(title="% of S&P 500", range=[0,105]),
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.info("No SMA columns found.")
+        except Exception as e:
+            st.error(f"Time series tab error: {e}")
+
+    # ── Tab 4: Sectors ────────────────────────────────────────────────────
+    with tabs[3]:
+        try:
+            if sec_df.empty:
+                st.info("No sector data.")
+            else:
+                all_sectors = sorted(sec_df["sector"].unique().tolist())
+                sel_secs = st.multiselect("Sectors", options=all_sectors, default=all_sectors[:8])
+                plot_sec = sec_df[sec_df["sector"].isin(sel_secs)] if sel_secs else sec_df
+
+                if "above_200sma" in plot_sec.columns:
+                    fig = px.line(
+                        plot_sec.sort_values("date"),
+                        x="date", y="above_200sma", color="sector",
+                        labels={"date":"Date","above_200sma":"% >200 SMA","sector":"Sector"},
+                    )
+                    fig.update_layout(
+                        **PLOTLY_BASE, height=450,
+                        xaxis=dict(rangeselector=_rangeselector(), rangeslider=dict(visible=False)),
+                        yaxis=dict(title="% above 200 SMA", range=[0,105]),
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+        except Exception as e:
+            st.error(f"Sectors tab error: {e}")
+
+    # ── Tab 5: About ──────────────────────────────────────────────────────
+    with tabs[4]:
+        st.markdown("""
+## S&P 500 Market Breadth Dashboard
+
+### Market Regime Definitions
+| Regime | % S&P 500 >200 SMA | Meaning |
+|--------|---------------------|---------|
+| 🟢 BULL | > 70% | Broad participation — most stocks in uptrend |
+| 🟡 MIXED | 50–70% | Selective market — large-caps leading |
+| 🟠 CAUTION | 30–50% | Weak breadth — risk rising |
+| 🔴 BEAR | < 30% | Broad deterioration — avoid new longs |
+
+### Breadth Indicators
+- **% >200 SMA**: Long-term trend health. Key regime indicator.
+- **% >50 SMA**: Short-term momentum participation.
+- **52-Week Highs**: New leadership emerging.
+- **52-Week Lows**: Distribution / selling pressure.
+- **WoW**: Week-over-week change in percentage points.
+
+### How to Use
+1. **Bull regime** (>70%): Aggressive — pursue breakouts, add exposure
+2. **Mixed regime** (50–70%): Selective — only highest-quality setups
+3. **Caution** (30–50%): Defensive — reduce new positions, tighten stops
+4. **Bear** (<30%): Avoid new longs. Focus on short setups or cash.
+
+Data: Weekly computation from S&P 500 universe, updated each Monday.
+""")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# RISK FACTORS SECTION
+# ══════════════════════════════════════════════════════════════════════════════
+
+elif section == "⚠️ Risk Factors":
+    st.title("⚠️ Market Risk Factors")
+
+    try:
+        risk_scores = load_risk_scores()
+        risk_ts     = load_risk_timeseries()
+    except Exception as e:
+        st.error(f"Failed to load risk data: {e}")
+        risk_scores = []
+        risk_ts = pd.DataFrame()
+
+    SIGNAL_COLORS_RISK = {"green": C_GREEN, "yellow": C_YELLOW, "red": C_RED, "na": C_GREY}
+    SIGNAL_LABELS_RISK = {"green": "LOW RISK", "yellow": "ELEVATED", "red": "HIGH RISK", "na": "N/A"}
+    SIGNAL_EMOJI_RISK  = {"green": "🟢", "yellow": "🟡", "red": "🔴", "na": "⚪"}
+
+    tabs = st.tabs([
+        "📊 Composite Trend",
+        "🎯 Multi-Horizon Signals",
+        "📋 Current Signals",
+    ])
+
+    # ── Tab 1: Composite Trend ────────────────────────────────────────────
+    with tabs[0]:
+        try:
+            if risk_ts.empty:
+                st.warning("No composite timeseries at data/risk_factors/composite_timeseries.parquet")
+            else:
+                # KPI cards
+                if "composite_20" in risk_ts.columns and "composite_50" in risk_ts.columns:
+                    last_row = risk_ts.dropna(subset=["composite_20","composite_50"]).iloc[-1]
+                    v20 = float(last_row["composite_20"])
+                    v50 = float(last_row["composite_50"])
+
+                    def _score_label_risk(v):
+                        if v >= 0.3:  return f"🟢 Low Risk ({v:+.2f})"
+                        if v >= -0.3: return f"🟡 Neutral ({v:+.2f})"
+                        return f"🔴 High Risk ({v:+.2f})"
+
+                    m1, m2 = st.columns(2)
+                    m1.metric("20-Day Composite", _score_label_risk(v20))
+                    m2.metric("50-Day Composite", _score_label_risk(v50))
+
+                    st.markdown("---")
+
+                fig = go.Figure()
+                if "composite_20" in risk_ts.columns:
+                    fig.add_trace(go.Scatter(
+                        x=risk_ts["date"], y=risk_ts["composite_20"],
+                        mode="lines", name="20-Day MA",
+                        line=dict(color=C_BLUE, width=2.5),
+                        hovertemplate="%{x|%Y-%m-%d}<br>20d: %{y:.3f}<extra></extra>",
+                    ))
+                if "composite_50" in risk_ts.columns:
+                    fig.add_trace(go.Scatter(
+                        x=risk_ts["date"], y=risk_ts["composite_50"],
+                        mode="lines", name="50-Day MA",
+                        line=dict(color=C_RED, width=2.5),
+                        hovertemplate="%{x|%Y-%m-%d}<br>50d: %{y:.3f}<extra></extra>",
+                    ))
+
+                fig.add_hline(y=0,   line_dash="dash", line_color=C_GREY, opacity=0.6)
+                fig.add_hline(y=0.3, line_dash="dot",  line_color=C_GREEN, opacity=0.5,
+                              annotation_text="Low Risk", annotation_font_color=C_GREEN,
+                              annotation_position="top right")
+                fig.add_hline(y=-0.3, line_dash="dot", line_color=C_RED, opacity=0.5,
+                              annotation_text="High Risk", annotation_font_color=C_RED,
+                              annotation_position="bottom right")
+
+                # Range selector with longer history
+                rs_risk = dict(buttons=[
+                    dict(count=1, label="1Y", step="year",  stepmode="backward"),
+                    dict(count=3, label="3Y", step="year",  stepmode="backward"),
+                    dict(count=5, label="5Y", step="year",  stepmode="backward"),
+                    dict(step="all", label="All"),
+                ])
+                fig.update_layout(
+                    **PLOTLY_BASE, height=500,
+                    xaxis=dict(rangeselector=rs_risk, rangeslider=dict(visible=False)),
+                    yaxis=dict(title="Composite Score (−1 to +1)", range=[-1.2,1.2]),
+                )
+                st.plotly_chart(fig, use_container_width=True)
+        except Exception as e:
+            st.error(f"Composite trend tab error: {e}")
+
+    # ── Tab 2: Multi-Horizon Signals ──────────────────────────────────────
+    with tabs[1]:
+        try:
+            if not risk_scores:
+                st.warning("No risk score data at data/risk_factors/latest_scores.json")
+            else:
+                st.markdown("**15 factors × 3 horizons** — current/1W · 50-day/1M · 3M derived")
+
+                rows = []
+                for s in risk_scores:
+                    sig_curr = s.get("signal", "na")
+                    sig_50   = s.get("signal_50", sig_curr)
+                    # Derive 3M: if same as 50d signal → same, else → mixed (yellow)
+                    sig_3m   = sig_curr if sig_curr == sig_50 else "yellow"
+
+                    rows.append({
+                        "Factor": s.get("factor_name", s.get("name", "—")),
+                        "Value":  s.get("display_value", "—"),
+                        "Current/1W": sig_curr,
+                        "50-Day/1M":  sig_50,
+                        "3M (derived)": sig_3m,
+                    })
+
+                # Build Plotly table with colored cells
+                factor_col = [r["Factor"] for r in rows]
+                val_col    = [r["Value"] for r in rows]
+                curr_col   = [f"{SIGNAL_EMOJI_RISK[r['Current/1W']]} {SIGNAL_LABELS_RISK[r['Current/1W']]}" for r in rows]
+                m50_col    = [f"{SIGNAL_EMOJI_RISK[r['50-Day/1M']]} {SIGNAL_LABELS_RISK[r['50-Day/1M']]}" for r in rows]
+                m3_col     = [f"{SIGNAL_EMOJI_RISK[r['3M (derived)']]} {SIGNAL_LABELS_RISK[r['3M (derived)']]}" for r in rows]
+
+                CELL_BG = {"green":"#052e16","yellow":"#1c1400","red":"#1c0505","na":"#1a1f2e"}
+                CELL_FG = {"green":C_GREEN,"yellow":C_YELLOW,"red":C_RED,"na":C_GREY}
+
+                fig = go.Figure(data=[go.Table(
+                    columnwidth=[200,120,130,130,130],
+                    header=dict(
+                        values=["<b>Factor</b>","<b>Value</b>","<b>Current/1W</b>","<b>50-Day/1M</b>","<b>3M</b>"],
+                        fill_color="#1e3a5f",
+                        font=dict(color="white",size=12),
+                        align=["left","center","center","center","center"],
+                        height=36,
+                    ),
+                    cells=dict(
+                        values=[factor_col, val_col, curr_col, m50_col, m3_col],
+                        fill_color=[
+                            [C_CARD]*len(rows),
+                            [C_CARD]*len(rows),
+                            [CELL_BG[r["Current/1W"]] for r in rows],
+                            [CELL_BG[r["50-Day/1M"]] for r in rows],
+                            [CELL_BG[r["3M (derived)"]] for r in rows],
+                        ],
+                        font=dict(
+                            color=[
+                                ["#e2e8f0"]*len(rows),
+                                ["#94a3b8"]*len(rows),
+                                [CELL_FG[r["Current/1W"]] for r in rows],
+                                [CELL_FG[r["50-Day/1M"]] for r in rows],
+                                [CELL_FG[r["3M (derived)"]] for r in rows],
+                            ],
+                            size=11,
+                        ),
+                        align=["left","center","center","center","center"],
+                        height=32,
+                    ),
+                )])
+                fig.update_layout(
+                    **PLOTLY_BASE,
+                    height=max(500, len(rows)*34+80),
+                    margin=dict(l=0,r=0,t=10,b=10),
+                )
+                st.plotly_chart(fig, use_container_width=True)
+        except Exception as e:
+            st.error(f"Multi-horizon tab error: {e}")
+
+    # ── Tab 3: Current Signals ────────────────────────────────────────────
+    with tabs[2]:
+        try:
+            if not risk_scores:
+                st.warning("No risk data.")
+            else:
+                # Composite KPI
+                green_count = sum(1 for s in risk_scores if s.get("signal") == "green")
+                yellow_count= sum(1 for s in risk_scores if s.get("signal") == "yellow")
+                red_count   = sum(1 for s in risk_scores if s.get("signal") == "red")
+                total       = len(risk_scores)
+
+                overall = "green" if green_count >= total*0.6 else ("red" if red_count >= total*0.6 else "yellow")
+                ov_col  = SIGNAL_COLORS_RISK[overall]
+
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric(f"🟢 Low Risk",  green_count)
+                m2.metric(f"🟡 Elevated",  yellow_count)
+                m3.metric(f"🔴 High Risk", red_count)
+                m4.metric(f"Total Factors", total)
+
+                st.markdown(
+                    f"<div style='background:{ov_col}22;border:2px solid {ov_col}66;"
+                    f"border-radius:10px;padding:12px 20px;margin:12px 0;'>"
+                    f"<span style='color:{ov_col};font-size:1.2em;font-weight:800;'>"
+                    f"{SIGNAL_EMOJI_RISK[overall]} Overall: {SIGNAL_LABELS_RISK[overall]}"
+                    f" ({green_count}G / {yellow_count}Y / {red_count}R)</span>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+                st.markdown("---")
+
+                # Factor cards — 3 column grid
+                factor_cols = st.columns(3)
+                for i, s in enumerate(risk_scores):
+                    signal  = s.get("signal", "na")
+                    sig_col = SIGNAL_COLORS_RISK.get(signal, C_GREY)
+                    name    = s.get("factor_name", s.get("name", f"Factor {i+1}"))
+                    desc    = s.get("description", "")
+                    val     = s.get("display_value", "—")
+                    text    = s.get("text", "")
+
+                    with factor_cols[i % 3]:
+                        st.markdown(
+                            f"<div style='background:{C_CARD};border:1px solid {sig_col}44;"
+                            f"border-left:4px solid {sig_col};border-radius:8px;"
+                            f"padding:12px;margin-bottom:8px;'>"
+                            f"<div style='display:flex;justify-content:space-between;align-items:flex-start;'>"
+                            f"<div>"
+                            f"<div style='font-weight:700;color:#e2e8f0;font-size:0.88rem;'>{name}</div>"
+                            f"<div style='color:{C_GREY};font-size:0.72rem;margin-top:2px;'>{desc}</div>"
+                            f"</div>"
+                            f"<div style='text-align:right;'>"
+                            f"<div style='color:{sig_col};font-weight:700;font-size:0.82rem;'>"
+                            f"{SIGNAL_EMOJI_RISK[signal]} {SIGNAL_LABELS_RISK[signal]}</div>"
+                            f"<div style='color:#e2e8f0;font-size:0.9rem;font-weight:600;'>{val}</div>"
+                            f"</div>"
+                            f"</div>"
+                            f"<div style='color:{C_GREY};font-size:0.72rem;margin-top:6px;'>{text}</div>"
+                            f"</div>",
+                            unsafe_allow_html=True,
+                        )
+        except Exception as e:
+            st.error(f"Current signals tab error: {e}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SMART MONEY SECTION
+# ══════════════════════════════════════════════════════════════════════════════
+
+elif section == "💰 Smart Money":
+    st.title("💰 Smart Money")
+    st.markdown("---")
+    st.markdown(
+        f"<div style='background:{C_CARD};border:1px solid {C_YELLOW}55;"
+        f"border-left:4px solid {C_YELLOW};border-radius:8px;padding:24px;"
+        f"text-align:center;'>"
+        f"<div style='font-size:2em;margin-bottom:8px;'>🚧</div>"
+        f"<div style='color:{C_YELLOW};font-size:1.2em;font-weight:700;'>"
+        f"Insider data pipeline scheduled</div>"
+        f"<div style='color:{C_GREY};margin-top:8px;'>"
+        f"Appearing in next daily run</div>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown("""
+### Planned Features
+- Institutional 13F filings (quarterly)
+- Insider buy/sell transactions (SEC Form 4)
+- Dark pool flow signals
+- Options unusual activity
+- Smart money accumulation score per stock
+""")
