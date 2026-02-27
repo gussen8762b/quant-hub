@@ -141,6 +141,18 @@ def load_ml_signals() -> pd.DataFrame:
 
 
 @st.cache_data(ttl=3600)
+def load_signal_history() -> pd.DataFrame:
+    p = DATA_ROOT / "ml_signals" / "signal_history_full.csv"
+    if not p.exists():
+        return pd.DataFrame()
+    try:
+        df = pd.read_csv(p, parse_dates=["date"])
+        return df.sort_values("date").reset_index(drop=True)
+    except Exception:
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=3600)
 def load_canslim_rankings() -> pd.DataFrame:
     p = DATA_ROOT / "canslim" / "composite_rankings.csv"
     if not p.exists():
@@ -215,13 +227,50 @@ def load_risk_scores() -> list[dict]:
 @st.cache_data(ttl=3600)
 def load_risk_timeseries() -> pd.DataFrame:
     p = DATA_ROOT / "risk_factors" / "composite_timeseries.parquet"
-    if not p.exists():
-        return pd.DataFrame()
+    p_csv = DATA_ROOT / "risk_factors" / "composite_timeseries.csv"
     try:
-        df = pd.read_parquet(p)
+        if p.exists():
+            df = pd.read_parquet(p)
+        elif p_csv.exists():
+            df = pd.read_csv(p_csv)
+        else:
+            return pd.DataFrame()
         if "date" in df.columns:
             df["date"] = pd.to_datetime(df["date"], errors="coerce")
             df = df.sort_values("date").reset_index(drop=True)
+        return df
+    except Exception as e:
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=3600)
+def load_smart_money_db() -> pd.DataFrame:
+    """Load insider transactions from smartmoney.db."""
+    import sqlite3
+    db_path = DATA_ROOT / "smart_money" / "smartmoney.db"
+    if not db_path.exists():
+        return pd.DataFrame()
+    try:
+        conn = sqlite3.connect(str(db_path))
+        query = """
+            SELECT
+                c.ticker,
+                it.owner_name as insider_name,
+                it.owner_role as role_title,
+                it.shares,
+                it.total_value,
+                it.transaction_date,
+                it.price_per_share,
+                it.security_title,
+                COALESCE(it.conviction_score, it.role_weight * 20) as conviction_score
+            FROM insider_transactions it
+            JOIN companies c ON it.company_id = c.id
+            WHERE it.transaction_code = 'P'
+            ORDER BY conviction_score DESC, it.transaction_date DESC
+            LIMIT 200
+        """
+        df = pd.read_sql_query(query, conn)
+        conn.close()
         return df
     except Exception:
         return pd.DataFrame()
@@ -550,6 +599,12 @@ elif section == "🤖 ML Signals":
                         display_cols.append(extra)
 
                 disp = latest[[c for c in display_cols if c in latest.columns]].copy()
+                # Format model predictions as percentage strings before rename
+                for mc in MODEL_COLS:
+                    if mc in disp.columns:
+                        disp[mc] = disp[mc].apply(
+                            lambda v: f"{float(v)*100:.1f}%" if pd.notna(v) and v != "" else "—"
+                        )
                 disp = disp.rename(columns={mc: MODEL_NAMES[mc] for mc in MODEL_COLS if mc in disp.columns})
                 disp = disp.rename(columns={
                     "ensemble_direction": "Direction",
@@ -566,9 +621,6 @@ elif section == "🤖 ML Signals":
                 styled = disp.style
                 if "Direction" in disp.columns:
                     styled = styled.applymap(_color_dir, subset=["Direction"])
-                for mc_name in MODEL_NAMES.values():
-                    if mc_name in disp.columns:
-                        styled = styled.background_gradient(subset=[mc_name], cmap="RdYlGn", vmin=-1, vmax=1)
 
                 st.dataframe(styled, use_container_width=True, hide_index=True)
         except Exception as e:
@@ -577,157 +629,244 @@ elif section == "🤖 ML Signals":
     # ── Tab 3: History ─────────────────────────────────────────────────────
     with tabs[2]:
         try:
-            if meta_df.empty:
-                st.info("No data.")
+            hist_df = load_signal_history()
+            if hist_df.empty:
+                # Fall back to meta_df if full history not synced yet
+                if meta_df.empty:
+                    st.info("No signal history data found. Run sync_data.sh to copy signal_history_full.csv")
+                else:
+                    st.info("signal_history_full.csv not found — showing signal_log_meta.csv (12 rows). Run sync_data.sh for full history.")
+                    hist_df = meta_df.copy()
             else:
-                disp = meta_df.copy()
-                disp["Horizon"] = disp["horizon"].map(HORIZON_LABEL).fillna(disp["horizon"])
-                disp["Asset"]   = disp["asset"].map(ASSET_LABELS).fillna(disp["asset"])
-                disp["Date"]    = disp["date"].dt.strftime("%Y-%m-%d")
+                st.caption(f"**signal_history_full.csv** — {len(hist_df):,} rows · dates {hist_df['date'].min().strftime('%Y-%m-%d')} → {hist_df['date'].max().strftime('%Y-%m-%d')}")
 
-                # Filters
-                fc1, fc2, fc3 = st.columns(3)
+            if not hist_df.empty:
+                # OOS toggle
+                has_oos = "is_oos" in hist_df.columns
+                fc0, fc1, fc2, fc3, fc4 = st.columns([1, 2, 2, 2, 1])
+                with fc0:
+                    if has_oos:
+                        oos_only = st.checkbox("OOS only", value=True, key="hist_oos")
+                    else:
+                        oos_only = False
                 with fc1:
-                    sel_assets = st.multiselect("Asset", options=list(ASSET_LABELS.values()),
-                                                default=list(ASSET_LABELS.values()), key="hist_asset")
+                    asset_opts = sorted(hist_df["asset"].dropna().unique().tolist()) if "asset" in hist_df.columns else list(ASSETS)
+                    sel_assets = st.multiselect("Asset", options=asset_opts,
+                                                default=asset_opts, key="hist_asset2")
                 with fc2:
-                    sel_hz = st.multiselect("Horizon", options=["3-Day","10-Day","40-Day"],
-                                            default=["3-Day","10-Day","40-Day"], key="hist_hz")
+                    hz_opts = sorted(hist_df["horizon"].dropna().unique().tolist()) if "horizon" in hist_df.columns else ["short","medium","long"]
+                    sel_hz = st.multiselect("Horizon", options=hz_opts,
+                                            default=hz_opts, key="hist_hz2")
                 with fc3:
-                    sel_dir = st.multiselect("Direction", options=["LONG","SHORT","NEUTRAL"],
-                                             default=["LONG","SHORT","NEUTRAL"], key="hist_dir")
+                    model_opts = sorted(hist_df["model"].dropna().unique().tolist()) if "model" in hist_df.columns else []
+                    sel_models = st.multiselect("Model", options=model_opts,
+                                                default=model_opts, key="hist_model")
+                with fc4:
+                    show_rows = st.number_input("Rows", min_value=50, max_value=5000, value=500, step=100, key="hist_rows")
 
-                mask = (
-                    disp["Asset"].isin(sel_assets) &
-                    disp["Horizon"].isin(sel_hz)
-                )
-                if "ensemble_direction" in disp.columns:
-                    mask &= disp["ensemble_direction"].str.upper().isin(sel_dir)
-                disp = disp[mask]
+                disp = hist_df.copy()
+                if oos_only and has_oos:
+                    disp = disp[disp["is_oos"] == True]
+                if sel_assets and "asset" in disp.columns:
+                    disp = disp[disp["asset"].isin(sel_assets)]
+                if sel_hz and "horizon" in disp.columns:
+                    disp = disp[disp["horizon"].isin(sel_hz)]
+                if sel_models and "model" in disp.columns:
+                    disp = disp[disp["model"].isin(sel_models)]
 
-                show_cols = ["Date", "Asset", "Horizon"]
-                if "ensemble_direction" in disp.columns:
-                    show_cols.append("ensemble_direction")
-                if "confidence_level" in disp.columns:
-                    show_cols.append("confidence_level")
-                if "vote_count" in disp.columns:
-                    show_cols.append("vote_count")
-                for mc in MODEL_COLS:
-                    if mc in disp.columns:
-                        show_cols.append(mc)
+                disp = disp.sort_values("date", ascending=False).head(int(show_rows))
 
-                disp_out = disp[[c for c in show_cols if c in disp.columns]].sort_values("Date", ascending=False)
-                disp_out = disp_out.rename(columns={mc: MODEL_NAMES[mc] for mc in MODEL_COLS if mc in disp_out.columns})
-                disp_out = disp_out.rename(columns={
-                    "ensemble_direction": "Direction",
-                    "confidence_level": "Confidence",
-                    "vote_count": "Votes",
-                })
-                st.dataframe(disp_out, use_container_width=True, hide_index=True, height=500)
+                # Format prediction column
+                if "prediction" in disp.columns:
+                    disp["prediction"] = disp["prediction"].apply(
+                        lambda v: f"{float(v)*100:.2f}%" if pd.notna(v) else "—"
+                    )
+                if "actual_return" in disp.columns:
+                    disp["actual_return"] = disp["actual_return"].apply(
+                        lambda v: f"{float(v)*100:.2f}%" if pd.notna(v) else "—"
+                    )
+                if "date" in disp.columns:
+                    disp["date"] = disp["date"].dt.strftime("%Y-%m-%d") if hasattr(disp["date"].iloc[0], "strftime") else disp["date"].astype(str).str[:10]
+
+                show_cols = [c for c in ["date","asset","horizon","model","direction","prediction","actual_return","is_correct","is_oos"] if c in disp.columns]
+                st.dataframe(disp[show_cols], use_container_width=True, hide_index=True, height=500)
+                st.caption(f"Showing {len(disp):,} rows (most recent first)")
         except Exception as e:
             st.error(f"History tab error: {e}")
 
     # ── Tab 4: P&L ────────────────────────────────────────────────────────
     with tabs[3]:
         try:
-            if meta_df.empty:
-                st.info("No data available for P&L computation.")
+            hist_df = load_signal_history()
+            if hist_df.empty:
+                st.info("P&L requires signal_history_full.csv — run sync_data.sh to copy it.")
             else:
-                st.markdown("**Directional signal P&L** — cumulative score of correct direction calls (LONG=+1, SHORT=-1, NEUTRAL=0)")
+                st.markdown("**Model P&L** — cumulative returns using actual_return × directional position (LONG=+1, SHORT/FLAT=-1, NEUTRAL=0)")
 
-                for asset in ASSETS:
-                    asset_df = meta_df[meta_df["asset"] == asset].copy()
-                    if asset_df.empty:
-                        continue
+                pnl_df = hist_df[hist_df["actual_return"].notna()].copy()
+                if pnl_df.empty:
+                    st.warning("No rows with actual_return populated yet.")
+                else:
+                    # Compute position and pnl
+                    pnl_df["position"] = pnl_df["direction"].map(
+                        {"LONG": 1, "SHORT": -1, "FLAT": -1, "NEUTRAL": 0}
+                    ).fillna(0)
+                    pnl_df["pnl"] = pnl_df["position"] * pnl_df["actual_return"]
 
-                    label = ASSET_LABELS.get(asset, asset)
-                    st.markdown(f"#### {label}")
+                    # Filters
+                    fc1, fc2 = st.columns(2)
+                    with fc1:
+                        asset_opts = sorted(pnl_df["asset"].dropna().unique().tolist())
+                        sel_asset_pnl = st.selectbox("Asset", options=asset_opts, key="pnl_asset")
+                    with fc2:
+                        hz_opts_pnl = sorted(pnl_df["horizon"].dropna().unique().tolist())
+                        sel_hz_pnl = st.selectbox("Horizon", options=hz_opts_pnl, key="pnl_hz")
 
-                    fig = go.Figure()
-                    for hz_key, hz_day, hz_label in HORIZONS:
-                        hz_df = asset_df[asset_df["horizon"] == hz_key].sort_values("date").copy()
-                        if hz_df.empty or "ensemble_direction" not in hz_df.columns:
-                            continue
-                        hz_df["signal_val"] = hz_df["ensemble_direction"].map(
-                            {"LONG": 1, "SHORT": -1, "NEUTRAL": 0, "FLAT": 0}
-                        ).fillna(0)
-                        hz_df["cumulative"] = hz_df["signal_val"].cumsum()
-                        fig.add_trace(go.Scatter(
-                            x=hz_df["date"], y=hz_df["cumulative"],
-                            mode="lines", name=hz_label,
-                            hovertemplate="%{x|%Y-%m-%d}<br>Cum: %{y}<extra></extra>",
-                        ))
+                    sub = pnl_df[(pnl_df["asset"] == sel_asset_pnl) & (pnl_df["horizon"] == sel_hz_pnl)].copy()
+                    if sub.empty:
+                        st.info(f"No data for {sel_asset_pnl} / {sel_hz_pnl}")
+                    else:
+                        # Cumulative P&L per model
+                        models_avail = sorted(sub["model"].dropna().unique().tolist()) if "model" in sub.columns else []
+                        fig = go.Figure()
+                        summary_rows = []
 
-                    fig.update_layout(
-                        **PLOTLY_BASE,
-                        height=300,
-                        xaxis=dict(rangeselector=_rangeselector(), rangeslider=dict(visible=False)),
-                        yaxis_title="Cumulative directional score",
-                    )
-                    st.plotly_chart(fig, use_container_width=True)
+                        for mdl in models_avail:
+                            mdl_df = sub[sub["model"] == mdl].sort_values("date").copy()
+                            mdl_df["cum_pnl"] = mdl_df["pnl"].cumsum()
+                            fig.add_trace(go.Scatter(
+                                x=mdl_df["date"], y=mdl_df["cum_pnl"] * 100,
+                                mode="lines", name=mdl,
+                                hovertemplate=f"{mdl}<br>%{{x|%Y-%m-%d}}<br>Cum P&L: %{{y:.1f}}%<extra></extra>",
+                            ))
+                            # Summary stats
+                            pnl_s = mdl_df["pnl"]
+                            n = len(pnl_s)
+                            total_ret = float(pnl_s.sum()) * 100
+                            win_rate = float((pnl_s > 0).mean() * 100) if n > 0 else 0
+                            sharpe = float(pnl_s.mean() / pnl_s.std() * math.sqrt(252)) if (n > 1 and pnl_s.std() > 0) else 0
+                            summary_rows.append({
+                                "Model": mdl,
+                                "N Signals": n,
+                                "Total Return %": round(total_ret, 2),
+                                "Win Rate %": round(win_rate, 1),
+                                "Sharpe": round(sharpe, 2),
+                            })
 
-                # Summary stats per asset+horizon
-                st.markdown("#### Direction Summary")
-                rows = []
-                for asset in ASSETS:
-                    for hz_key, _, hz_label in HORIZONS:
-                        sub = meta_df[(meta_df["asset"] == asset) & (meta_df["horizon"] == hz_key)]
-                        if sub.empty or "ensemble_direction" not in sub.columns:
-                            continue
-                        vals = sub["ensemble_direction"].str.upper()
-                        total = len(vals)
-                        rows.append({
-                            "Asset": ASSET_LABELS.get(asset, asset),
-                            "Horizon": hz_label,
-                            "Total Signals": total,
-                            "LONG": int((vals == "LONG").sum()),
-                            "SHORT": int((vals == "SHORT").sum()),
-                            "NEUTRAL": int((vals == "NEUTRAL").sum()),
-                        })
-                if rows:
-                    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+                        rs_pnl = dict(buttons=[
+                            dict(count=1, label="1M", step="month", stepmode="backward"),
+                            dict(count=3, label="3M", step="month", stepmode="backward"),
+                            dict(count=6, label="6M", step="month", stepmode="backward"),
+                            dict(count=1, label="1Y", step="year",  stepmode="backward"),
+                            dict(count=3, label="3Y", step="year",  stepmode="backward"),
+                            dict(step="all", label="All"),
+                        ])
+                        fig.update_layout(
+                            **PLOTLY_BASE,
+                            height=450,
+                            title=f"{sel_asset_pnl} {sel_hz_pnl} — Cumulative P&L",
+                            xaxis=dict(rangeselector=rs_pnl, rangeslider=dict(visible=False)),
+                            yaxis_title="Cumulative Return %",
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+
+                        if summary_rows:
+                            st.markdown("#### Summary Statistics")
+                            sum_df = pd.DataFrame(summary_rows).sort_values("Sharpe", ascending=False)
+                            def _ret_color_pnl(val):
+                                try:
+                                    return f"color: {C_GREEN}" if float(val) > 0 else f"color: {C_RED}"
+                                except Exception:
+                                    return ""
+                            styled_sum = sum_df.style
+                            for col in ["Total Return %", "Sharpe"]:
+                                if col in sum_df.columns:
+                                    styled_sum = styled_sum.applymap(_ret_color_pnl, subset=[col])
+                            st.dataframe(styled_sum, use_container_width=True, hide_index=True)
         except Exception as e:
             st.error(f"P&L tab error: {e}")
 
     # ── Tab 5: Performance (signal flips) ─────────────────────────────────
     with tabs[4]:
         try:
-            if meta_df.empty:
+            hist_df = load_signal_history()
+            src_df = hist_df if not hist_df.empty else meta_df
+
+            if src_df.empty:
                 st.info("No data.")
             else:
-                flips = []
-                for (asset, hz), grp in meta_df.groupby(["asset", "horizon"]):
-                    grp = grp.sort_values("date").copy()
-                    if "ensemble_direction" not in grp.columns:
-                        continue
-                    prev_dir = grp["ensemble_direction"].shift(1)
-                    changed  = grp["ensemble_direction"] != prev_dir
-                    for _, row in grp[changed & prev_dir.notna()].iterrows():
-                        flips.append({
-                            "Date": row["date"].strftime("%Y-%m-%d") if hasattr(row["date"], "strftime") else str(row["date"])[:10],
-                            "Asset": ASSET_LABELS.get(asset, asset),
-                            "Horizon": HORIZON_LABEL.get(hz, hz),
-                            "From": prev_dir[row.name],
-                            "To": row["ensemble_direction"],
-                            "Confidence": row.get("confidence_level", "—"),
-                            "Votes": row.get("vote_count", "—"),
-                        })
+                # Last signal detected per asset+horizon+model
+                st.markdown("### Last Signal Per Asset × Horizon")
+                if "asset" in src_df.columns and "horizon" in src_df.columns:
+                    grp_cols = ["asset", "horizon"]
+                    if "model" in src_df.columns:
+                        grp_cols.append("model")
+                    last_signals = src_df.sort_values("date").groupby(grp_cols).last().reset_index()
+                    for _, row in last_signals.head(12).iterrows():
+                        dt = row["date"]
+                        dt_str = dt.strftime("%Y-%m-%d") if hasattr(dt, "strftime") else str(dt)[:10]
+                        direction = str(row.get("direction", row.get("ensemble_direction", "—")))
+                        asset_label = ASSET_LABELS.get(row.get("asset",""), row.get("asset",""))
+                        mdl = row.get("model", "")
+                        hz = HORIZON_LABEL.get(row.get("horizon",""), row.get("horizon",""))
+                        st.info(f"**{asset_label}** {hz} {f'[{mdl}]' if mdl else ''} — Last signal: {dt_str} — {direction}")
 
-                if not flips:
-                    st.info("No signal flips detected.")
+                st.markdown("---")
+
+                # Signal flips
+                st.markdown("### Direction Flip History")
+                dir_col = "direction" if "direction" in src_df.columns else "ensemble_direction"
+                if dir_col not in src_df.columns:
+                    st.info("No direction column found.")
                 else:
-                    flip_df = pd.DataFrame(flips).sort_values("Date", ascending=False)
-                    st.markdown(f"**{len(flip_df)} signal flips detected**")
+                    flip_group_cols = ["asset", "horizon"]
+                    if "model" in src_df.columns:
+                        flip_group_cols.append("model")
 
-                    def _color_flip(val):
-                        col = DIRECTION_COLOR.get(str(val).upper(), "")
-                        return f"color: {col}; font-weight: bold" if col else ""
+                    flips = []
+                    for keys, grp in src_df.groupby(flip_group_cols):
+                        grp = grp.sort_values("date").copy()
+                        prev_dir = grp[dir_col].shift(1)
+                        changed  = grp[dir_col] != prev_dir
+                        changed_rows = grp[changed & prev_dir.notna()]
+                        for idx, row in changed_rows.iterrows():
+                            dt = row["date"]
+                            # 5-day actual return after flip
+                            future = grp[grp["date"] > dt].head(5)
+                            ret5 = None
+                            if "actual_return" in grp.columns and not future.empty:
+                                ret5_vals = future["actual_return"].dropna()
+                                if not ret5_vals.empty:
+                                    ret5 = float(ret5_vals.mean()) * 100
 
-                    styled = flip_df.style
-                    for col in ["From", "To"]:
-                        if col in flip_df.columns:
-                            styled = styled.applymap(_color_flip, subset=[col])
-                    st.dataframe(styled, use_container_width=True, hide_index=True)
+                            asset_k = keys[0] if isinstance(keys, tuple) else keys
+                            hz_k    = keys[1] if isinstance(keys, tuple) and len(keys) > 1 else ""
+                            mdl_k   = keys[2] if isinstance(keys, tuple) and len(keys) > 2 else ""
+                            flips.append({
+                                "Date": dt.strftime("%Y-%m-%d") if hasattr(dt, "strftime") else str(dt)[:10],
+                                "Asset": ASSET_LABELS.get(asset_k, asset_k),
+                                "Horizon": HORIZON_LABEL.get(hz_k, hz_k),
+                                "Model": mdl_k,
+                                "From": prev_dir[idx],
+                                "To": row[dir_col],
+                                "5D Return %": f"{ret5:+.2f}%" if ret5 is not None else "—",
+                            })
+
+                    if not flips:
+                        st.info("No signal flips detected.")
+                    else:
+                        flip_df = pd.DataFrame(flips).sort_values("Date", ascending=False).head(200)
+                        st.markdown(f"**{len(flip_df)} signal flips detected** (showing last 200)")
+
+                        def _color_flip(val):
+                            col = DIRECTION_COLOR.get(str(val).upper(), "")
+                            return f"color: {col}; font-weight: bold" if col else ""
+
+                        styled = flip_df.style
+                        for col in ["From", "To"]:
+                            if col in flip_df.columns:
+                                styled = styled.applymap(_color_flip, subset=[col])
+                        st.dataframe(styled, use_container_width=True, hide_index=True)
         except Exception as e:
             st.error(f"Performance tab error: {e}")
 
@@ -801,40 +940,76 @@ that historically lead or confirm equity and crypto market direction.
                         unsafe_allow_html=True,
                     )
 
-            if not meta_df.empty and "ensemble_direction" in meta_df.columns:
-                st.markdown("### Model Directional Accuracy vs Ensemble")
-                st.markdown("Fraction of signals where each model matches the ensemble direction.")
+            # Per-model directional accuracy from signal_history_full
+            try:
+                hist_df = load_signal_history()
+                if not hist_df.empty and "model" in hist_df.columns and "is_correct" in hist_df.columns:
+                    st.markdown("### Per-Model Directional Accuracy (Historical)")
+                    st.markdown("Mean(is_correct) per model × asset from signal_history_full.csv")
 
-                acc_rows = []
-                for asset in ASSETS:
-                    asset_df = meta_df[meta_df["asset"] == asset]
-                    for mc in MODEL_COLS[:-1]:  # skip ensemble_pred itself
-                        if mc not in asset_df.columns:
-                            continue
-                        ens = asset_df["ensemble_direction"].str.upper()
-                        pred_dir = asset_df[mc].apply(lambda v: "LONG" if (not pd.isna(v) and float(v) > 0) else ("SHORT" if (not pd.isna(v) and float(v) < 0) else "NEUTRAL"))
-                        acc = (pred_dir == ens).mean()
-                        acc_rows.append({
-                            "Model": MODEL_NAMES.get(mc, mc),
-                            "Asset": ASSET_LABELS.get(asset, asset),
-                            "Accuracy": round(acc * 100, 1),
-                        })
+                    acc_df = (
+                        hist_df.groupby(["model", "asset"])["is_correct"]
+                        .mean()
+                        .reset_index()
+                    )
+                    acc_df["is_correct"] = (acc_df["is_correct"] * 100).round(1)
+                    acc_df["asset_label"] = acc_df["asset"].map(ASSET_LABELS).fillna(acc_df["asset"])
 
-                if acc_rows:
-                    acc_df  = pd.DataFrame(acc_rows)
-                    pivot   = acc_df.pivot(index="Model", columns="Asset", values="Accuracy")
-                    fig_hm  = go.Figure(go.Heatmap(
-                        z=pivot.values,
-                        x=list(pivot.columns),
-                        y=list(pivot.index),
-                        colorscale=[[0, C_RED],[0.5, C_YELLOW],[1, C_GREEN]],
-                        zmin=0, zmax=100,
-                        text=[[f"{v:.0f}%" for v in row] for row in pivot.values],
-                        texttemplate="%{text}",
-                        hovertemplate="Model: %{y}<br>Asset: %{x}<br>Accuracy: %{z:.1f}%<extra></extra>",
-                    ))
-                    fig_hm.update_layout(**PLOTLY_BASE, height=300, margin=dict(l=100,r=20,t=40,b=60))
-                    st.plotly_chart(fig_hm, use_container_width=True)
+                    try:
+                        pivot = acc_df.pivot(index="model", columns="asset_label", values="is_correct")
+                        fig_hm = go.Figure(go.Heatmap(
+                            z=pivot.values,
+                            x=list(pivot.columns),
+                            y=list(pivot.index),
+                            colorscale=[[0, C_RED],[0.5, C_YELLOW],[1, C_GREEN]],
+                            zmin=0, zmax=100,
+                            text=[[f"{v:.0f}%" if not pd.isna(v) else "" for v in row] for row in pivot.values],
+                            texttemplate="%{text}",
+                            hovertemplate="Model: %{y}<br>Asset: %{x}<br>Accuracy: %{z:.1f}%<extra></extra>",
+                        ))
+                        fig_hm.update_layout(**PLOTLY_BASE, height=350, margin=dict(l=120,r=20,t=40,b=60))
+                        st.plotly_chart(fig_hm, use_container_width=True)
+                    except Exception as e2:
+                        st.dataframe(acc_df, use_container_width=True, hide_index=True)
+
+                elif not meta_df.empty and "ensemble_direction" in meta_df.columns:
+                    st.markdown("### Model Directional Accuracy vs Ensemble (Latest only)")
+                    st.caption("Install signal_history_full.csv for full historical accuracy.")
+
+                    acc_rows = []
+                    for asset in ASSETS:
+                        asset_df = meta_df[meta_df["asset"] == asset]
+                        for mc in MODEL_COLS[:-1]:
+                            if mc not in asset_df.columns:
+                                continue
+                            ens = asset_df["ensemble_direction"].str.upper()
+                            pred_dir = asset_df[mc].apply(lambda v: "LONG" if (not pd.isna(v) and float(v) > 0) else ("SHORT" if (not pd.isna(v) and float(v) < 0) else "NEUTRAL"))
+                            acc = (pred_dir == ens).mean()
+                            acc_rows.append({
+                                "Model": MODEL_NAMES.get(mc, mc),
+                                "Asset": ASSET_LABELS.get(asset, asset),
+                                "Accuracy": round(acc * 100, 1),
+                            })
+                    if acc_rows:
+                        acc_df2 = pd.DataFrame(acc_rows)
+                        try:
+                            pivot2 = acc_df2.pivot(index="Model", columns="Asset", values="Accuracy")
+                            fig_hm2 = go.Figure(go.Heatmap(
+                                z=pivot2.values,
+                                x=list(pivot2.columns),
+                                y=list(pivot2.index),
+                                colorscale=[[0, C_RED],[0.5, C_YELLOW],[1, C_GREEN]],
+                                zmin=0, zmax=100,
+                                text=[[f"{v:.0f}%" for v in row] for row in pivot2.values],
+                                texttemplate="%{text}",
+                                hovertemplate="Model: %{y}<br>Asset: %{x}<br>Accuracy: %{z:.1f}%<extra></extra>",
+                            ))
+                            fig_hm2.update_layout(**PLOTLY_BASE, height=300, margin=dict(l=100,r=20,t=40,b=60))
+                            st.plotly_chart(fig_hm2, use_container_width=True)
+                        except Exception as e3:
+                            st.dataframe(acc_df2, use_container_width=True, hide_index=True)
+            except Exception as e4:
+                st.error(f"Model accuracy heatmap error: {e4}")
         except Exception as e:
             st.error(f"Models tab error: {e}")
 
@@ -847,58 +1022,85 @@ that historically lead or confirm equity and crypto market direction.
                 st.markdown("### Model Agreement Grid")
                 st.markdown("Latest vote_count/n_models per asset × horizon. Darker green = higher consensus.")
 
-                latest = (
-                    meta_df.sort_values("date")
-                    .groupby(["asset","horizon"])
-                    .last()
-                    .reset_index()
-                )
+                try:
+                    latest = (
+                        meta_df.sort_values("date")
+                        .groupby(["asset","horizon"])
+                        .last()
+                        .reset_index()
+                    )
+                except Exception as e_grp:
+                    st.error(f"Could not group data: {e_grp}")
+                    latest = pd.DataFrame()
 
-                if "vote_count" in latest.columns and "n_models" in latest.columns:
-                    latest["agreement"] = latest["vote_count"] / latest["n_models"].replace(0, np.nan)
-                    pivot = latest.pivot(index="asset", columns="horizon", values="agreement")
-                    pivot.index = [ASSET_LABELS.get(a, a) for a in pivot.index]
-                    # Reorder columns
-                    hz_order = ["short","medium","long"]
-                    pivot = pivot.reindex(columns=[h for h in hz_order if h in pivot.columns])
-                    pivot.columns = [HORIZON_LABEL.get(c, c) for c in pivot.columns]
+                if not latest.empty and "vote_count" in latest.columns and "n_models" in latest.columns:
+                    try:
+                        latest["vote_count"] = pd.to_numeric(latest["vote_count"], errors="coerce")
+                        latest["n_models"]   = pd.to_numeric(latest["n_models"], errors="coerce")
+                        latest["agreement"]  = latest["vote_count"] / latest["n_models"].replace(0, np.nan)
+                        pivot = latest.pivot(index="asset", columns="horizon", values="agreement")
+                        pivot.index = [ASSET_LABELS.get(a, a) for a in pivot.index]
+                        hz_order = ["short","medium","long"]
+                        pivot = pivot.reindex(columns=[h for h in hz_order if h in pivot.columns])
+                        pivot.columns = [HORIZON_LABEL.get(c, c) for c in pivot.columns]
 
-                    # Text overlay
-                    votes_pivot = latest.pivot(index="asset", columns="horizon", values="vote_count")
-                    nmod_pivot  = latest.pivot(index="asset", columns="horizon", values="n_models")
-                    votes_pivot.index = [ASSET_LABELS.get(a, a) for a in votes_pivot.index]
-                    nmod_pivot.index  = [ASSET_LABELS.get(a, a) for a in nmod_pivot.index]
-                    votes_pivot = votes_pivot.reindex(columns=[h for h in hz_order if h in votes_pivot.columns])
-                    nmod_pivot  = nmod_pivot.reindex(columns=[h for h in hz_order if h in nmod_pivot.columns])
-                    votes_pivot.columns = [HORIZON_LABEL.get(c, c) for c in votes_pivot.columns]
-                    nmod_pivot.columns  = [HORIZON_LABEL.get(c, c) for c in nmod_pivot.columns]
+                        # Text overlay — use numeric values safely
+                        votes_pivot = latest.pivot(index="asset", columns="horizon", values="vote_count")
+                        nmod_pivot  = latest.pivot(index="asset", columns="horizon", values="n_models")
+                        votes_pivot.index = [ASSET_LABELS.get(a, a) for a in votes_pivot.index]
+                        nmod_pivot.index  = [ASSET_LABELS.get(a, a) for a in nmod_pivot.index]
+                        votes_pivot = votes_pivot.reindex(columns=[h for h in hz_order if h in votes_pivot.columns])
+                        nmod_pivot  = nmod_pivot.reindex(columns=[h for h in hz_order if h in nmod_pivot.columns])
+                        votes_pivot.columns = [HORIZON_LABEL.get(c, c) for c in votes_pivot.columns]
+                        nmod_pivot.columns  = [HORIZON_LABEL.get(c, c) for c in nmod_pivot.columns]
 
-                    text = [[f"{int(votes_pivot.iloc[r,c])}/{int(nmod_pivot.iloc[r,c])}"
-                             if not pd.isna(pivot.iloc[r,c]) else "—"
-                             for c in range(pivot.shape[1])]
-                            for r in range(pivot.shape[0])]
+                        def _safe_frac(r, c):
+                            try:
+                                v = votes_pivot.iloc[r, c]
+                                n = nmod_pivot.iloc[r, c]
+                                if pd.isna(v) or pd.isna(n):
+                                    return "—"
+                                return f"{int(v)}/{int(n)}"
+                            except Exception:
+                                return "—"
 
-                    fig = go.Figure(go.Heatmap(
-                        z=pivot.values,
-                        x=list(pivot.columns),
-                        y=list(pivot.index),
-                        colorscale=[[0, C_RED],[0.4, C_YELLOW],[0.7, C_GREEN],[1.0,"#15803d"]],
-                        zmin=0, zmax=1,
-                        text=text,
-                        texttemplate="%{text}",
-                        hovertemplate="Asset: %{y}<br>Horizon: %{x}<br>Agreement: %{z:.0%}<extra></extra>",
-                    ))
-                    fig.update_layout(**PLOTLY_BASE, height=350, margin=dict(l=80,r=20,t=40,b=60))
-                    st.plotly_chart(fig, use_container_width=True)
+                        text = [[_safe_frac(r, c) for c in range(pivot.shape[1])]
+                                for r in range(pivot.shape[0])]
+
+                        # Ensure z data is numeric
+                        z_vals = pivot.values.astype(float)
+
+                        fig = go.Figure(go.Heatmap(
+                            z=z_vals,
+                            x=list(pivot.columns),
+                            y=list(pivot.index),
+                            colorscale=[[0, C_RED],[0.4, C_YELLOW],[0.7, C_GREEN],[1.0,"#15803d"]],
+                            zmin=0, zmax=1,
+                            text=text,
+                            texttemplate="%{text}",
+                            hovertemplate="Asset: %{y}<br>Horizon: %{x}<br>Agreement: %{z:.0%}<extra></extra>",
+                        ))
+                        fig.update_layout(**PLOTLY_BASE, height=350, margin=dict(l=80,r=20,t=40,b=60))
+                        st.plotly_chart(fig, use_container_width=True)
+                    except Exception as e_hm:
+                        st.error(f"Agreement heatmap error: {e_hm}")
+                        # Fallback table
+                        if "vote_count" in latest.columns:
+                            st.dataframe(latest[["asset","horizon","vote_count","n_models"]].fillna("—"),
+                                         use_container_width=True, hide_index=True)
 
                     # Direction overlay table
-                    if "ensemble_direction" in latest.columns:
-                        dir_pivot = latest.pivot(index="asset", columns="horizon", values="ensemble_direction")
-                        dir_pivot.index   = [ASSET_LABELS.get(a, a) for a in dir_pivot.index]
-                        dir_pivot         = dir_pivot.reindex(columns=[h for h in hz_order if h in dir_pivot.columns])
-                        dir_pivot.columns = [HORIZON_LABEL.get(c, c) for c in dir_pivot.columns]
-                        st.markdown("**Current ensemble directions:**")
-                        st.dataframe(dir_pivot, use_container_width=True)
+                    try:
+                        if "ensemble_direction" in latest.columns:
+                            hz_order = ["short","medium","long"]
+                            dir_pivot = latest.pivot(index="asset", columns="horizon", values="ensemble_direction")
+                            dir_pivot.index   = [ASSET_LABELS.get(a, a) for a in dir_pivot.index]
+                            dir_pivot         = dir_pivot.reindex(columns=[h for h in hz_order if h in dir_pivot.columns])
+                            dir_pivot.columns = [HORIZON_LABEL.get(c, c) for c in dir_pivot.columns]
+                            st.markdown("**Current ensemble directions:**")
+                            st.dataframe(dir_pivot, use_container_width=True)
+                    except Exception as e_dir:
+                        st.error(f"Direction table error: {e_dir}")
                 else:
                     st.info("vote_count or n_models columns not found in data.")
         except Exception as e:
@@ -1026,7 +1228,10 @@ elif section == "📈 CAN SLIM":
                 if "Tier" in disp.columns:
                     styled = styled.applymap(_tier_color, subset=["Tier"])
                 if "Score" in disp.columns:
-                    styled = styled.background_gradient(subset=["Score"], cmap="RdYlGn", vmin=60, vmax=100)
+                    try:
+                        styled = styled.background_gradient(subset=["Score"], cmap="RdYlGn", vmin=60, vmax=100)
+                    except Exception:
+                        pass  # fallback: no gradient
 
                 st.dataframe(styled, use_container_width=True, hide_index=True)
 
@@ -1389,6 +1594,8 @@ elif section == "🪙 Crypto":
 
                 st.markdown("---")
 
+                st.info("💡 **Multi-horizon view**: Short-term (2W), Mid-term (12W), Long-term (52W) signals require additional pipeline runs — coming in next update")
+
                 disp_cols = [c for c in ["Rank","Symbol","Composite","Tier","RS Score","Tech Score",
                                           "Fund Score","RRG Regime","RS %ile","RS Momentum",
                                           "RS Breakout","Golden ✕","Death ✕"]
@@ -1486,22 +1693,27 @@ elif section == "🪙 Crypto":
             else:
                 score_cols = [c for c in ["RS Score","Tech Score","Fund Score","Composite"] if c in cr_latest.columns]
                 if not score_cols:
-                    st.info("No score columns found.")
+                    st.info("No score columns found (expected: RS Score, Tech Score, Fund Score, Composite).")
                 else:
                     hm_df = cr_latest.copy()
                     if "Symbol" in hm_df.columns:
                         hm_df = hm_df.sort_values("Composite", ascending=True) if "Composite" in hm_df.columns else hm_df
                         hm_df["sym_clean"] = hm_df["Symbol"].apply(_clean_sym)
-                    z_data = hm_df[[c for c in score_cols if c in hm_df.columns]].values
                     syms   = hm_df["sym_clean"].tolist() if "sym_clean" in hm_df.columns else hm_df.index.tolist()
+
+                    # Force all score columns to numeric
+                    for sc in score_cols:
+                        hm_df[sc] = pd.to_numeric(hm_df[sc], errors="coerce")
+
+                    z_data = hm_df[score_cols].values.astype(float)
 
                     fig = go.Figure(go.Heatmap(
                         z=z_data,
                         x=score_cols,
                         y=syms,
-                        colorscale=[[0,C_RED],[0.4,C_YELLOW],[0.7,C_GREEN],[1,"#15803d"]],
+                        colorscale="RdYlGn",
                         zmin=0, zmax=100,
-                        text=[[f"{v:.0f}" if not pd.isna(v) else "" for v in row] for row in z_data],
+                        text=[[f"{v:.0f}" if not np.isnan(v) else "" for v in row] for row in z_data],
                         texttemplate="%{text}",
                         hovertemplate="Symbol: %{y}<br>Metric: %{x}<br>Score: %{z:.1f}<extra></extra>",
                     ))
@@ -1520,8 +1732,8 @@ elif section == "🪙 Crypto":
                 run_dates = sorted(cr_df["run_date"].dropna().unique()) if "run_date" in cr_df.columns else []
                 if len(run_dates) < 2:
                     d = run_dates[0] if run_dates else "?"
-                    st.info(f"Data since {str(d)[:10]}. Need 2+ run dates for trend charts.")
-                    st.dataframe(cr_latest, use_container_width=True)
+                    st.info(f"Only 1 run date ({str(d)[:10]}). Showing full table. Run analyzer again to build trend history.")
+                    st.dataframe(cr_latest, use_container_width=True, height=500)
                 else:
                     hist = cr_df.copy()
                     if "Symbol" in hist.columns:
@@ -1539,7 +1751,7 @@ elif section == "🪙 Crypto":
                             markers=True,
                             labels={"run_date":"Date","Composite":"Composite Score","sym_clean":"Symbol"},
                         )
-                        fig.update_layout(**PLOTLY_BASE, height=420, yaxis=dict(range=[0,100]))
+                        fig.update_layout(**PLOTLY_BASE, height=500, yaxis=dict(range=[0,100]))
                         st.plotly_chart(fig, use_container_width=True)
         except Exception as e:
             st.error(f"History tab error: {e}")
@@ -1789,25 +2001,35 @@ elif section == "📊 S&P Breadth":
             if sec_df.empty:
                 st.info("No sector data.")
             else:
-                latest_sec = sec_df.groupby("sector").last().reset_index()
-                metrics = [c for c in ["above_50sma","above_200sma","new_52w_high","new_52w_low"] if c in latest_sec.columns]
-                if not metrics:
-                    st.info("No metric columns found.")
-                else:
-                    labels = {"above_50sma":">50SMA","above_200sma":">200SMA","new_52w_high":"52W High","new_52w_low":"52W Low"}
-                    z_data  = latest_sec[metrics].values
-                    sectors = latest_sec["sector"].tolist()
-                    x_labels = [labels.get(m,m) for m in metrics]
+                try:
+                    latest_sec = sec_df.groupby("sector").last().reset_index()
+                    metrics = [c for c in ["above_50sma","above_200sma","new_52w_high","new_52w_low"] if c in latest_sec.columns]
+                    if not metrics:
+                        st.info("No metric columns found in breadth_sector_weekly.csv.")
+                    else:
+                        labels = {"above_50sma":">50SMA","above_200sma":">200SMA","new_52w_high":"52W High%","new_52w_low":"52W Low%"}
+                        # ETF labels for y-axis
+                        sec_labels = [f"{s} ({SECTOR_ETF.get(s, '')})" if SECTOR_ETF.get(s) else s
+                                      for s in latest_sec["sector"].tolist()]
+                        x_labels = [labels.get(m, m) for m in metrics]
 
-                    fig = go.Figure(go.Heatmap(
-                        z=z_data, x=x_labels, y=sectors,
-                        colorscale=[[0,C_RED],[0.5,C_YELLOW],[1,C_GREEN]],
-                        text=[[f"{v:.1f}%" if not pd.isna(v) else "" for v in row] for row in z_data],
-                        texttemplate="%{text}",
-                        hovertemplate="Sector: %{y}<br>Metric: %{x}<br>Value: %{z:.1f}%<extra></extra>",
-                    ))
-                    fig.update_layout(**PLOTLY_BASE, height=450, margin=dict(l=150,r=20,t=40,b=60))
-                    st.plotly_chart(fig, use_container_width=True)
+                        # Force numeric
+                        for m in metrics:
+                            latest_sec[m] = pd.to_numeric(latest_sec[m], errors="coerce")
+                        z_data = latest_sec[metrics].values.astype(float)
+
+                        fig = go.Figure(go.Heatmap(
+                            z=z_data, x=x_labels, y=sec_labels,
+                            colorscale="RdYlGn",
+                            text=[[f"{v:.1f}%" if not np.isnan(v) else "" for v in row] for row in z_data],
+                            texttemplate="%{text}",
+                            hovertemplate="Sector: %{y}<br>Metric: %{x}<br>Value: %{z:.1f}%<extra></extra>",
+                        ))
+                        fig.update_layout(**PLOTLY_BASE, height=max(450, 30*len(sec_labels)),
+                                          margin=dict(l=200,r=20,t=40,b=60))
+                        st.plotly_chart(fig, use_container_width=True)
+                except Exception as e2:
+                    st.error(f"Breadth heatmap error: {e2}")
         except Exception as e:
             st.error(f"Heatmap tab error: {e}")
 
@@ -1835,14 +2057,50 @@ elif section == "📊 S&P Breadth":
                     fig.add_hline(y=70, line_dash="dot", line_color=C_GREEN, opacity=0.5, annotation_text="Bull threshold")
                     fig.add_hline(y=50, line_dash="dot", line_color=C_YELLOW, opacity=0.5, annotation_text="Neutral")
                     fig.add_hline(y=30, line_dash="dot", line_color=C_RED, opacity=0.5, annotation_text="Bear threshold")
+                    rs_breadth = dict(buttons=[
+                        dict(count=1,  label="1M",  step="month", stepmode="backward"),
+                        dict(count=3,  label="3M",  step="month", stepmode="backward"),
+                        dict(count=6,  label="6M",  step="month", stepmode="backward"),
+                        dict(count=1,  label="1Y",  step="year",  stepmode="backward"),
+                        dict(step="all", label="All"),
+                    ])
                     fig.update_layout(
                         **PLOTLY_BASE, height=450,
-                        xaxis=dict(rangeselector=_rangeselector(), rangeslider=dict(visible=False)),
+                        xaxis=dict(
+                            rangeselector=rs_breadth, rangeslider=dict(visible=False),
+                            range=["2022-01-01", idx_df["date"].max().strftime("%Y-%m-%d")],
+                        ),
                         yaxis=dict(title="% of S&P 500", range=[0,105]),
                     )
                     st.plotly_chart(fig, use_container_width=True)
                 else:
                     st.info("No SMA columns found.")
+
+                # Sector Breadth — % above 200 SMA sub-section
+                if not sec_df.empty and "above_200sma" in sec_df.columns:
+                    st.markdown("---")
+                    st.subheader("Sector Breadth — % above 200 SMA")
+                    try:
+                        sec_pivot = sec_df.pivot_table(index="date", columns="sector", values="above_200sma", aggfunc="last")
+                        sec_pivot = sec_pivot.sort_index()
+                        fig2 = go.Figure()
+                        for col in sec_pivot.columns:
+                            fig2.add_trace(go.Scatter(
+                                x=sec_pivot.index, y=sec_pivot[col],
+                                mode="lines", name=col,
+                                hovertemplate=f"{col}<br>%{{x|%Y-%m-%d}}<br>%{{y:.1f}}%<extra></extra>",
+                            ))
+                        fig2.update_layout(
+                            **PLOTLY_BASE, height=450,
+                            xaxis=dict(
+                                rangeselector=rs_breadth, rangeslider=dict(visible=False),
+                                range=["2022-01-01", sec_df["date"].max().strftime("%Y-%m-%d")],
+                            ),
+                            yaxis=dict(title="% above 200 SMA", range=[0,105]),
+                        )
+                        st.plotly_chart(fig2, use_container_width=True)
+                    except Exception as e3:
+                        st.error(f"Sector time series error: {e3}")
         except Exception as e:
             st.error(f"Time series tab error: {e}")
 
@@ -1852,8 +2110,39 @@ elif section == "📊 S&P Breadth":
             if sec_df.empty:
                 st.info("No sector data.")
             else:
+                # Per-sector metrics table
+                st.subheader("Current Sector Metrics")
+                try:
+                    latest_sec2 = sec_df.groupby("sector").last().reset_index()
+                    sec_metric_rows = []
+                    for _, sr in latest_sec2.iterrows():
+                        sname = sr["sector"]
+                        etf   = SECTOR_ETF.get(sname, "")
+                        p200  = float(pd.to_numeric(sr.get("above_200sma", 0), errors="coerce") or 0)
+                        p50   = float(pd.to_numeric(sr.get("above_50sma",  0), errors="coerce") or 0)
+
+                        sec_hist2 = sec_df[sec_df["sector"] == sname].sort_values("date")
+                        if len(sec_hist2) >= 2:
+                            prev = sec_hist2.iloc[-2]
+                            wow200 = p200 - float(pd.to_numeric(prev.get("above_200sma", p200), errors="coerce") or p200)
+                            wow50  = p50  - float(pd.to_numeric(prev.get("above_50sma",  p50),  errors="coerce") or p50)
+                        else:
+                            wow200, wow50 = 0.0, 0.0
+
+                        sec_metric_rows.append({
+                            "Sector": f"{sname} ({etf})" if etf else sname,
+                            "%>50SMA": f"{p50:.1f}%",
+                            "%>200SMA": f"{p200:.1f}%",
+                            "WoW 200": f"{wow200:+.1f}pp",
+                            "ATH note": "Requires yfinance — coming soon",
+                        })
+                    st.dataframe(pd.DataFrame(sec_metric_rows), use_container_width=True, hide_index=True)
+                except Exception as e2:
+                    st.error(f"Sector metrics error: {e2}")
+
+                st.markdown("---")
                 all_sectors = sorted(sec_df["sector"].unique().tolist())
-                sel_secs = st.multiselect("Sectors", options=all_sectors, default=all_sectors[:8])
+                sel_secs = st.multiselect("Sectors for chart", options=all_sectors, default=all_sectors[:8])
                 plot_sec = sec_df[sec_df["sector"].isin(sel_secs)] if sel_secs else sec_df
 
                 if "above_200sma" in plot_sec.columns:
@@ -1863,7 +2152,7 @@ elif section == "📊 S&P Breadth":
                         labels={"date":"Date","above_200sma":"% >200 SMA","sector":"Sector"},
                     )
                     fig.update_layout(
-                        **PLOTLY_BASE, height=450,
+                        **PLOTLY_BASE, height=600,
                         xaxis=dict(rangeselector=_rangeselector(), rangeslider=dict(visible=False)),
                         yaxis=dict(title="% above 200 SMA", range=[0,105]),
                     )
@@ -1930,7 +2219,8 @@ elif section == "⚠️ Risk Factors":
     with tabs[0]:
         try:
             if risk_ts.empty:
-                st.warning("No composite timeseries at data/risk_factors/composite_timeseries.parquet")
+                st.warning("No composite timeseries found. Tried: composite_timeseries.parquet and composite_timeseries.csv")
+                st.info("Run: python run_hub_cache.py or python compute_composite.py to generate this file.")
             else:
                 # KPI cards
                 if "composite_20" in risk_ts.columns and "composite_50" in risk_ts.columns:
@@ -2095,11 +2385,13 @@ elif section == "⚠️ Risk Factors":
                 )
                 st.markdown("---")
 
-                # Factor cards — 3 column grid
+                # Factor cards — 3 column grid, 2 horizons per card
                 factor_cols = st.columns(3)
                 for i, s in enumerate(risk_scores):
-                    signal  = s.get("signal", "na")
-                    sig_col = SIGNAL_COLORS_RISK.get(signal, C_GREY)
+                    signal     = s.get("signal", "na")
+                    signal_50  = s.get("signal_50", signal)
+                    sig_col    = SIGNAL_COLORS_RISK.get(signal, C_GREY)
+                    sig_col_50 = SIGNAL_COLORS_RISK.get(signal_50, C_GREY)
                     name    = s.get("factor_name", s.get("name", f"Factor {i+1}"))
                     desc    = s.get("description", "")
                     val     = s.get("display_value", "—")
@@ -2110,18 +2402,22 @@ elif section == "⚠️ Risk Factors":
                             f"<div style='background:{C_CARD};border:1px solid {sig_col}44;"
                             f"border-left:4px solid {sig_col};border-radius:8px;"
                             f"padding:12px;margin-bottom:8px;'>"
-                            f"<div style='display:flex;justify-content:space-between;align-items:flex-start;'>"
-                            f"<div>"
-                            f"<div style='font-weight:700;color:#e2e8f0;font-size:0.88rem;'>{name}</div>"
-                            f"<div style='color:{C_GREY};font-size:0.72rem;margin-top:2px;'>{desc}</div>"
-                            f"</div>"
-                            f"<div style='text-align:right;'>"
-                            f"<div style='color:{sig_col};font-weight:700;font-size:0.82rem;'>"
+                            f"<div style='font-weight:700;color:#e2e8f0;font-size:0.88rem;margin-bottom:4px;'>{name}</div>"
+                            f"<div style='color:{C_GREY};font-size:0.72rem;margin-bottom:6px;'>{desc}</div>"
+                            f"<div style='display:flex;gap:8px;'>"
+                            f"<div style='flex:1;background:{sig_col}11;border:1px solid {sig_col}33;border-radius:4px;padding:4px 6px;'>"
+                            f"<div style='color:{C_GREY};font-size:0.65rem;'>Current</div>"
+                            f"<div style='color:{sig_col};font-weight:700;font-size:0.8rem;'>"
                             f"{SIGNAL_EMOJI_RISK[signal]} {SIGNAL_LABELS_RISK[signal]}</div>"
-                            f"<div style='color:#e2e8f0;font-size:0.9rem;font-weight:600;'>{val}</div>"
+                            f"</div>"
+                            f"<div style='flex:1;background:{sig_col_50}11;border:1px solid {sig_col_50}33;border-radius:4px;padding:4px 6px;'>"
+                            f"<div style='color:{C_GREY};font-size:0.65rem;'>50-Day</div>"
+                            f"<div style='color:{sig_col_50};font-weight:700;font-size:0.8rem;'>"
+                            f"{SIGNAL_EMOJI_RISK[signal_50]} {SIGNAL_LABELS_RISK[signal_50]}</div>"
                             f"</div>"
                             f"</div>"
-                            f"<div style='color:{C_GREY};font-size:0.72rem;margin-top:6px;'>{text}</div>"
+                            f"<div style='color:#e2e8f0;font-size:0.88rem;font-weight:600;margin-top:4px;'>{val}</div>"
+                            f"<div style='color:{C_GREY};font-size:0.72rem;margin-top:4px;'>{text}</div>"
                             f"</div>",
                             unsafe_allow_html=True,
                         )
@@ -2134,24 +2430,102 @@ elif section == "⚠️ Risk Factors":
 # ══════════════════════════════════════════════════════════════════════════════
 
 elif section == "💰 Smart Money":
-    st.title("💰 Smart Money")
+    st.title("💰 Smart Money — Insider Transactions")
     st.markdown("---")
-    st.markdown(
-        f"<div style='background:{C_CARD};border:1px solid {C_YELLOW}55;"
-        f"border-left:4px solid {C_YELLOW};border-radius:8px;padding:24px;"
-        f"text-align:center;'>"
-        f"<div style='font-size:2em;margin-bottom:8px;'>🚧</div>"
-        f"<div style='color:{C_YELLOW};font-size:1.2em;font-weight:700;'>"
-        f"Insider data pipeline scheduled</div>"
-        f"<div style='color:{C_GREY};margin-top:8px;'>"
-        f"Appearing in next daily run</div>"
-        f"</div>",
-        unsafe_allow_html=True,
-    )
+
+    try:
+        sm_df = load_smart_money_db()
+        db_path = DATA_ROOT / "smart_money" / "smartmoney.db"
+        db_mtime = _file_mtime(db_path)
+    except Exception as e:
+        sm_df = pd.DataFrame()
+        db_mtime = "—"
+        st.error(f"Error loading Smart Money DB: {e}")
+
+    if sm_df.empty:
+        db_exists = (DATA_ROOT / "smart_money" / "smartmoney.db").exists()
+        if db_exists:
+            st.warning(
+                f"smartmoney.db exists (last updated: {db_mtime}) but contains no insider purchase transactions yet. "
+                f"Run: `cd projects/smart-money && python3 run_daily.py --form4-only --days 90 --limit 500`"
+            )
+        else:
+            st.markdown(
+                f"<div style='background:{C_CARD};border:1px solid {C_YELLOW}55;"
+                f"border-left:4px solid {C_YELLOW};border-radius:8px;padding:24px;'>"
+                f"<div style='color:{C_YELLOW};font-size:1.1em;font-weight:700;margin-bottom:8px;'>⏳ Insider pipeline not yet run</div>"
+                f"<div style='color:{C_GREY};'>Run: cd projects/smart-money && python3 run_daily.py --form4-only --days 90 --limit 500</div>"
+                f"<div style='color:{C_GREY};margin-top:6px;font-size:0.82rem;'>Last attempted: {db_mtime}</div>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+    else:
+        st.caption(f"smartmoney.db — last updated: {db_mtime} · {len(sm_df):,} insider purchases")
+
+        # Summary metrics
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Total Buys", len(sm_df))
+        if "ticker" in sm_df.columns:
+            m2.metric("Unique Tickers", sm_df["ticker"].nunique())
+        if "total_value" in sm_df.columns:
+            total_val = sm_df["total_value"].sum()
+            m3.metric("Total $ Value", f"${total_val/1e6:.1f}M" if total_val >= 1e6 else f"${total_val:,.0f}")
+        if "conviction_score" in sm_df.columns:
+            m4.metric("Avg Conviction", f"{sm_df['conviction_score'].mean():.1f}")
+
+        st.markdown("---")
+        st.subheader("Top Insider Buys by Conviction")
+
+        # Format display
+        disp_sm = sm_df.copy()
+        if "total_value" in disp_sm.columns:
+            disp_sm["total_value"] = disp_sm["total_value"].apply(
+                lambda v: f"${v:,.0f}" if pd.notna(v) else "—"
+            )
+        if "price_per_share" in disp_sm.columns:
+            disp_sm["price_per_share"] = disp_sm["price_per_share"].apply(
+                lambda v: f"${v:.2f}" if pd.notna(v) else "—"
+            )
+        if "shares" in disp_sm.columns:
+            disp_sm["shares"] = disp_sm["shares"].apply(
+                lambda v: f"{int(v):,}" if pd.notna(v) else "—"
+            )
+        if "conviction_score" in disp_sm.columns:
+            disp_sm["conviction_score"] = disp_sm["conviction_score"].round(1)
+
+        display_cols_sm = [c for c in ["ticker","insider_name","role_title","shares","price_per_share",
+                                        "total_value","transaction_date","conviction_score"]
+                           if c in disp_sm.columns]
+        disp_sm = disp_sm[display_cols_sm].head(50)
+        disp_sm = disp_sm.rename(columns={
+            "ticker": "Ticker",
+            "insider_name": "Insider",
+            "role_title": "Role",
+            "shares": "Shares",
+            "price_per_share": "Price",
+            "total_value": "Total Value",
+            "transaction_date": "Date",
+            "conviction_score": "Conviction",
+        })
+
+        def _conv_color(val):
+            try:
+                v = float(val)
+                if v >= 80: return f"color: {C_GREEN}; font-weight: bold"
+                if v >= 50: return f"color: {C_YELLOW}"
+                return f"color: {C_GREY}"
+            except Exception:
+                return ""
+
+        styled_sm = disp_sm.style
+        if "Conviction" in disp_sm.columns:
+            styled_sm = styled_sm.applymap(_conv_color, subset=["Conviction"])
+        st.dataframe(styled_sm, use_container_width=True, hide_index=True)
+
+    st.markdown("---")
     st.markdown("""
-### Planned Features
-- Institutional 13F filings (quarterly)
-- Insider buy/sell transactions (SEC Form 4)
+### Planned Enhancements
+- Institutional 13F filings (quarterly positions)
 - Dark pool flow signals
 - Options unusual activity
 - Smart money accumulation score per stock
