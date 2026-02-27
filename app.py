@@ -142,6 +142,11 @@ def load_ml_signals() -> pd.DataFrame:
 
 @st.cache_data(ttl=3600)
 def load_signal_history() -> pd.DataFrame:
+    p = DATA_ROOT / "ml_signals" / "signal_history_full.parquet"
+    if p.exists():
+        df = pd.read_parquet(p)
+        df["date"] = pd.to_datetime(df["date"])
+        return df
     p = DATA_ROOT / "ml_signals" / "signal_history_full.csv"
     if not p.exists():
         return pd.DataFrame()
