@@ -145,8 +145,10 @@ def load_signal_history() -> pd.DataFrame:
     p = DATA_ROOT / "ml_signals" / "signal_history_full.parquet"
     if p.exists():
         df = pd.read_parquet(p)
-        df["date"] = pd.to_datetime(df["date"])
-        return df
+        # Mixed formats: "2012-01-02" and "2012-01-02 00:00:00" — use errors='coerce' + strip time
+        df["date"] = pd.to_datetime(df["date"].astype(str).str[:10], errors="coerce")
+        df = df.dropna(subset=["date"])
+        return df.sort_values("date").reset_index(drop=True)
     p = DATA_ROOT / "ml_signals" / "signal_history_full.csv"
     if not p.exists():
         return pd.DataFrame()
