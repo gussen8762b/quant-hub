@@ -1,11 +1,5 @@
-# Python
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
 .env
-
-# macOS
 .DS_Store
-
-# Streamlit secrets (do not commit)
-.streamlit/secrets.toml
+*.log
