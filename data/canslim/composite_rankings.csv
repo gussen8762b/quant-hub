@@ -1,0 +1,52 @@
+ticker,composite_score,tier,technical_score,fundamental_score,pattern_score,market_score,best_pattern,rs_rating,trend_template_pass,squeeze_fired,price,sector
+GLW,87.37,A,93.56,87.0,85.84,78.27,vcp,98.0,True,False,150.3000030517578,Information Technology
+STX,87.22,A,77.73,95.29,94.28,78.27,vcp,98.0,True,False,409.6700134277344,Information Technology
+HWM,87.17,A,83.7,85.0,99.28,78.27,vcp,94.0,True,False,260.30999755859375,Industrials
+MNST,86.86,A,90.53,90.0,83.85,78.27,vcp,86.0,True,False,86.66000366210938,Consumer Staples
+TPR,86.5,A,90.31,95.0,76.68,78.27,vcp,96.0,True,False,160.49000549316406,Consumer Discretionary
+ADI,86.02,A,87.46,88.0,86.55,78.27,vcp,93.0,True,False,354.3500061035156,Information Technology
+CBOE,85.78,A,76.67,87.0,99.75,78.27,vcp,75.0,True,False,292.29998779296875,Financials
+FIX,85.75,A,84.27,92.0,84.52,78.27,vcp,98.0,True,False,1438.22998046875,Industrials
+SPG,85.42,A,72.25,90.0,100.0,78.27,vcp,64.0,True,False,202.60000610351562,Real Estate
+WDC,85.26,A,83.7,92.0,83.23,78.27,vcp,99.0,True,False,282.25,Information Technology
+GE,85.15,A,81.3,91.0,86.87,78.27,vcp,85.0,True,False,340.8399963378906,Industrials
+NEM,85.09,A,82.34,92.0,84.18,78.27,vcp,97.0,True,False,127.47000122070312,Materials
+APH,84.95,A,76.24,96.0,86.15,78.27,vcp,92.0,True,False,148.47000122070312,Information Technology
+NEE,84.84,A,86.53,88.0,82.96,78.27,vcp,74.0,True,False,91.98999786376953,Utilities
+KLAC,84.44,A,81.71,90.0,84.75,78.27,vcp,96.0,True,False,1524.31005859375,Information Technology
+EIX,83.9,A,82.71,92.0,78.96,78.27,vcp,87.0,True,False,74.37000274658203,Utilities
+PFG,83.64,A,78.86,91.0,83.75,78.27,vcp,70.0,True,False,97.5,Financials
+IBKR,83.53,A,76.4,92.0,85.08,78.27,vcp,82.0,True,False,74.55999755859375,Financials
+HCA,83.25,A,78.02,88.24,86.54,78.27,vcp,81.0,True,False,525.8800048828125,Health Care
+RL,83.24,A,75.42,81.0,98.31,78.27,vcp,77.0,True,False,378.8500061035156,Consumer Discretionary
+ROK,83.14,A,73.87,92.0,86.55,78.27,vcp,72.0,True,False,411.29998779296875,Industrials
+GS,83.06,A,79.33,86.0,86.88,78.27,vcp,85.0,True,False,929.0,Financials
+AMGN,83.06,A,78.25,90.0,83.36,78.27,vcp,77.0,True,False,379.3299865722656,Health Care
+JCI,83.02,A,81.66,77.0,94.74,78.27,vcp,90.0,True,False,143.4199981689453,Industrials
+JNJ,82.74,A,82.71,90.0,76.75,78.27,vcp,89.0,True,False,243.47000122070312,Health Care
+TEL,82.55,A,77.76,90.0,81.93,78.27,vcp,80.0,True,False,235.7899932861328,Information Technology
+CTRA,82.52,A,66.9,91.0,93.62,78.27,vcp,66.0,True,False,30.010000228881836,Energy
+MRK,82.42,A,78.74,85.0,86.22,78.27,vcp,86.0,True,False,119.30000305175781,Health Care
+APA,82.27,A,92.9,72.0,84.22,78.27,vcp,88.0,True,False,29.100000381469727,Energy
+TRGP,82.08,A,82.7,80.0,86.1,78.27,vcp,88.0,True,False,231.22000122070312,Energy
+EME,82.02,A,88.22,75.0,85.26,78.27,vcp,91.0,True,False,746.1799926757812,Industrials
+VTR,81.85,A,76.54,74.0,99.78,78.27,vcp,75.0,True,False,86.44000244140625,Real Estate
+GILD,81.52,A,75.28,85.0,86.78,78.27,vcp,78.0,True,False,143.77000427246094,Health Care
+BMY,81.49,A,78.99,85.0,82.22,78.27,vcp,81.0,True,False,61.099998474121094,Health Care
+PEP,81.38,A,73.18,90.0,82.72,78.27,vcp,66.0,True,False,167.5800018310547,Consumer Staples
+IVZ,81.29,A,76.43,74.0,97.69,78.27,vcp,91.0,True,False,27.09000015258789,Financials
+STLD,81.21,A,74.9,74.0,99.2,78.27,vcp,87.0,True,False,192.52000427246094,Materials
+CAH,80.98,A,81.78,65.88,99.75,78.27,vcp,90.0,True,False,227.1300048828125,Health Care
+CCL,80.93,A,77.85,87.0,78.92,78.27,vcp,82.0,True,False,32.70000076293945,Consumer Discretionary
+PWR,80.87,A,87.07,72.0,85.62,78.27,vcp,94.0,True,False,565.0499877929688,Industrials
+AAPL,80.85,A,64.31,87.0,94.88,78.27,vcp,55.0,True,False,272.95001220703125,Information Technology
+MCHP,80.81,A,77.53,83.0,83.65,78.27,vcp,84.0,True,False,74.97000122070312,Information Technology
+NDSN,80.79,A,77.59,73.0,95.47,78.27,vcp,85.0,True,False,292.6199951171875,Industrials
+FDX,80.61,A,86.71,80.0,75.41,78.27,vcp,95.0,True,False,387.67999267578125,Industrials
+FANG,80.58,A,71.5,86.0,86.34,78.27,vcp,60.0,True,False,166.97999572753906,Energy
+CMI,80.36,A,82.03,78.0,82.44,78.27,vcp,92.0,True,False,588.1099853515625,Industrials
+CINF,80.29,A,60.36,85.0,99.77,78.27,vcp,43.0,True,False,165.1999969482422,Financials
+MPWR,80.13,A,82.01,75.0,85.16,78.27,vcp,93.0,True,False,1180.1300048828125,Information Technology
+MCK,80.09,A,81.92,72.94,87.54,78.27,vcp,83.0,True,False,974.4500122070312,Health Care
+TXT,80.04,A,77.18,78.0,86.99,78.27,vcp,79.0,True,False,98.62999725341797,Industrials
+EL,80.0,A,78.58,78.0,85.14,78.27,vcp,89.0,True,False,111.9000015258789,Consumer Staples

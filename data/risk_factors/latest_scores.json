@@ -1,0 +1,122 @@
+[
+  {
+    "factor_name": "Yield Curve (2s10s)",
+    "description": "Treasury 10Y-2Y spread \u2014 classic recession signal",
+    "signal": "green",
+    "signal_50": "green",
+    "display_value": "0.60%",
+    "text": "Low risk"
+  },
+  {
+    "factor_name": "HY Credit Spread",
+    "description": "ICE BofA US High Yield OAS \u2014 credit stress gauge",
+    "signal": "green",
+    "signal_50": "green",
+    "display_value": "294bps",
+    "text": "Low risk"
+  },
+  {
+    "factor_name": "VIX",
+    "description": "CBOE Volatility Index \u2014 equity fear gauge",
+    "signal": "yellow",
+    "signal_50": "yellow",
+    "display_value": "21.16",
+    "text": "Elevated"
+  },
+  {
+    "factor_name": "DXY",
+    "description": "US Dollar Index \u2014 dollar strength via 20d ROC",
+    "signal": "yellow",
+    "signal_50": "green",
+    "display_value": "+1.6% (20d)",
+    "text": "Elevated"
+  },
+  {
+    "factor_name": "WTI Oil",
+    "description": "Crude oil front-month \u2014 energy/inflation signal via 20d ROC",
+    "signal": "green",
+    "signal_50": "red",
+    "display_value": "+3.3% (20d)",
+    "text": "Low risk"
+  },
+  {
+    "factor_name": "Copper/Gold Ratio",
+    "description": "Risk appetite proxy \u2014 growth vs safety preference via 20d ROC",
+    "signal": "green",
+    "signal_50": "red",
+    "display_value": "+0.4% (20d)",
+    "text": "Low risk"
+  },
+  {
+    "factor_name": "Fed Funds Rate",
+    "description": "Federal funds effective rate \u2014 monetary policy stance",
+    "signal": "green",
+    "signal_50": "green",
+    "display_value": "3.64%",
+    "text": "Cutting"
+  },
+  {
+    "factor_name": "MOVE Index (Bond Vol)",
+    "description": "ICE BofA MOVE Index \u2014 1-month implied Treasury vol; >100 = elevated bond stress",
+    "signal": "green",
+    "signal_50": "green",
+    "display_value": "63.93",
+    "text": "Low risk"
+  },
+  {
+    "factor_name": "EM vs DM Equities",
+    "description": "EEM/SPY ratio \u2014 emerging vs developed market momentum via 20d ROC",
+    "signal": "green",
+    "signal_50": "green",
+    "display_value": "+4.1% (20d)",
+    "text": "Low risk"
+  },
+  {
+    "factor_name": "SPX Breadth (RSP/SPY)",
+    "description": "Equal-weight vs cap-weight S&P 500 \u2014 market breadth proxy via 20d ROC",
+    "signal": "green",
+    "signal_50": "green",
+    "display_value": "+4.2% (20d)",
+    "text": "Low risk"
+  },
+  {
+    "factor_name": "HYG / TLT",
+    "description": "High Yield vs Long Treasuries \u2014 credit risk appetite via 20d ROC",
+    "signal": "red",
+    "signal_50": "red",
+    "display_value": "-3.1% (20d)",
+    "text": "High risk"
+  },
+  {
+    "factor_name": "High Beta / Low Beta",
+    "description": "SPHB/SPLV ratio \u2014 risk appetite, aggressive vs defensive via 20d ROC",
+    "signal": "red",
+    "signal_50": "yellow",
+    "display_value": "-4.3% (20d)",
+    "text": "High risk"
+  },
+  {
+    "factor_name": "XLY / XLP",
+    "description": "Consumer Discretionary vs Staples \u2014 growth confidence via 20d ROC",
+    "signal": "red",
+    "signal_50": "red",
+    "display_value": "-11.0% (20d)",
+    "text": "High risk"
+  },
+  {
+    "factor_name": "SMH / SPY",
+    "description": "Semiconductors vs S&P 500 \u2014 tech/growth leadership via 20d ROC",
+    "signal": "yellow",
+    "signal_50": "green",
+    "display_value": "-0.2% (20d)",
+    "text": "Elevated"
+  },
+  {
+    "factor_name": "Put/Call Ratio (5d MA)",
+    "description": "CBOE Total Put/Call Ratio 5-day average \u2014 options sentiment & hedging demand",
+    "signal": "red",
+    "signal_50": "red",
+    "display_value": "1.31",
+    "text": "High risk"
+  }
+]
