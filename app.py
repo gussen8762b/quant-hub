@@ -219,6 +219,17 @@ def load_breadth_sector() -> pd.DataFrame:
 
 
 @st.cache_data(ttl=3600)
+def load_breadth_ath() -> pd.DataFrame:
+    p = DATA_ROOT / "breadth" / "breadth_sector_ath.csv"
+    if not p.exists():
+        return pd.DataFrame()
+    try:
+        return pd.read_csv(p)
+    except Exception:
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=3600)
 def load_risk_scores() -> list[dict]:
     p = DATA_ROOT / "risk_factors" / "latest_scores.json"
     if not p.exists():
@@ -331,15 +342,17 @@ def _rrg_badge(regime: str) -> str:
 
 
 def _pred_arrow(val) -> str:
+    """Format raw return prediction (e.g. 0.0527) as coloured percentage arrow."""
     try:
         v = float(val)
     except (TypeError, ValueError):
         return "—"
-    if v > 0:
-        return f"<span style='color:{C_GREEN};font-weight:700;'>↑ {v:+.2f}</span>"
-    elif v < 0:
-        return f"<span style='color:{C_RED};font-weight:700;'>↓ {v:+.2f}</span>"
-    return f"<span style='color:{C_GREY};'>→ {v:.2f}</span>"
+    pct = v * 100
+    if pct > 0.001:
+        return f"<span style='color:{C_GREEN};font-weight:700;'>↑ {pct:+.2f}%</span>"
+    elif pct < -0.001:
+        return f"<span style='color:{C_RED};font-weight:700;'>↓ {pct:+.2f}%</span>"
+    return f"<span style='color:{C_GREY};'>→ {pct:.2f}%</span>"
 
 
 def _rangeselector() -> dict:
@@ -1428,11 +1441,19 @@ elif section == "📈 CAN SLIM":
                 st.info("No backtest data at data/canslim/backtest_results.json")
             else:
                 period = bt.get("period", "N/A")
+                mode   = bt.get("mode", "walkforward").replace("walkforward", "Walk-Forward")
                 st.markdown(
                     f"<div style='background:{C_CARD};border-left:4px solid {C_BLUE};"
-                    f"padding:10px 18px;border-radius:6px;margin-bottom:16px;'>"
-                    f"<span style='color:#e2e8f0;font-weight:700;'>📅 Backtest: {period}</span>"
-                    f"</div>",
+                    f"padding:14px 18px;border-radius:6px;margin-bottom:16px;'>"
+                    f"<div style='color:#e2e8f0;font-weight:700;font-size:1rem;margin-bottom:8px;'>"
+                    f"📈 CAN SLIM Long-Only Strategy — {mode} Backtest</div>"
+                    f"<div style='color:{C_GREY};font-size:0.82rem;line-height:1.8;'>"
+                    f"<b style='color:#cbd5e1;'>Universe:</b> S&P 500 constituents passing Trend Template &nbsp;|&nbsp; "
+                    f"<b style='color:#cbd5e1;'>Entry:</b> A / A+ tier (composite score ≥ 80), pattern trigger &nbsp;|&nbsp; "
+                    f"<b style='color:#cbd5e1;'>Exit:</b> 30-day hold or 8% stop-loss<br>"
+                    f"<b style='color:#cbd5e1;'>Benchmark:</b> SPY buy-and-hold &nbsp;|&nbsp; "
+                    f"<b style='color:#cbd5e1;'>Period:</b> {period}"
+                    f"</div></div>",
                     unsafe_allow_html=True,
                 )
 
@@ -1865,10 +1886,12 @@ elif section == "📊 S&P Breadth":
     try:
         idx_df = load_breadth_index()
         sec_df = load_breadth_sector()
+        ath_df = load_breadth_ath()
     except Exception as e:
         st.error(f"Failed to load breadth data: {e}")
         idx_df = pd.DataFrame()
         sec_df = pd.DataFrame()
+        ath_df = pd.DataFrame()
 
     def _get_regime(pct200: float) -> tuple[str,str]:
         if pct200 > 70:  return "🟢 BULL — Broad participation", C_GREEN
@@ -1909,11 +1932,25 @@ elif section == "📊 S&P Breadth":
                     unsafe_allow_html=True,
                 )
 
-                m1, m2, m3, m4 = st.columns(4)
-                m1.metric("% >200 SMA", f"{pct200:.1f}%", delta=f"{wow200:+.1f}pp WoW")
-                m2.metric("% >50 SMA",  f"{pct50:.1f}%",  delta=f"{wow50:+.1f}pp WoW")
-                m3.metric("52W Highs",  f"{h52:.0f}",     delta=f"{wowh:+.0f} WoW")
-                m4.metric("52W Lows",   f"{l52:.0f}",     delta=f"{wowl:+.0f} WoW", delta_color="inverse")
+                # ATH proximity (index-wide)
+                ath_idx_pct = None
+                ath_date    = None
+                if not ath_df.empty:
+                    idx_row_ath = ath_df[ath_df["sector"] == "S&P 500 (Index)"]
+                    if not idx_row_ath.empty:
+                        ath_idx_pct = float(idx_row_ath.iloc[0]["near_ath_pct"])
+                        ath_date    = idx_row_ath.iloc[0].get("date", "")
+
+                m1, m2, m3, m4, m5 = st.columns(5)
+                m1.metric("% >200 SMA",   f"{pct200:.1f}%",       delta=f"{wow200:+.1f}pp WoW")
+                m2.metric("% >50 SMA",    f"{pct50:.1f}%",        delta=f"{wow50:+.1f}pp WoW")
+                m3.metric("52W Highs",    f"{h52:.0f}",           delta=f"{wowh:+.0f} WoW")
+                m4.metric("52W Lows",     f"{l52:.0f}",           delta=f"{wowl:+.0f} WoW", delta_color="inverse")
+                if ath_idx_pct is not None:
+                    m5.metric("Near ATH (±3%)", f"{ath_idx_pct:.1f}%",
+                              delta=f"as of {ath_date}" if ath_date else None)
+                else:
+                    m5.metric("Near ATH (±3%)", "—")
 
                 # Sector table
                 if not sec_df.empty:
@@ -1927,6 +1964,12 @@ elif section == "📊 S&P Breadth":
                         cutoff_date = idx_df["date"].max() - pd.Timedelta(weeks=4)
                         old_sec = sec_df[sec_df["date"] <= cutoff_date].groupby("sector").last().reset_index()
                         sec_4w = old_sec.set_index("sector")["above_200sma"].rename("pct200_4w")
+
+                    # Build ATH lookup: sector → near_ath_pct
+                    ath_lookup = {}
+                    if not ath_df.empty and "sector" in ath_df.columns:
+                        for _, ar in ath_df.iterrows():
+                            ath_lookup[ar["sector"]] = ar.get("near_ath_pct", None)
 
                     sector_rows = []
                     for _, sr in latest_sec.iterrows():
@@ -1953,14 +1996,19 @@ elif section == "📊 S&P Breadth":
                         elif wow_200 > -3: trend = "↓"
                         else:             trend = "↓↓"
 
+                        # ATH proximity
+                        near_ath = ath_lookup.get(sname)
+                        near_ath_str = f"{near_ath:.1f}%" if near_ath is not None else "—"
+
                         sector_rows.append({
                             "Sector": f"{sname} ({etf})" if etf else sname,
-                            "%>200SMA": f"{p200:.1f}%",
-                            "%>50SMA":  f"{p50:.1f}%",
-                            "WoW pp":   f"{wow_200:+.1f}",
-                            "MoM pp":   f"{mom_200:+.1f}" if mom_200 is not None else "—",
+                            "%>200SMA":   f"{p200:.1f}%",
+                            "%>50SMA":    f"{p50:.1f}%",
+                            "WoW pp":     f"{wow_200:+.1f}",
+                            "MoM pp":     f"{mom_200:+.1f}" if mom_200 is not None else "—",
                             "52W Highs%": f"{h_pct:.1f}%",
-                            "Trend":    trend,
+                            "Near ATH":   near_ath_str,
+                            "Trend":      trend,
                         })
 
                     sec_tbl = pd.DataFrame(sector_rows)
@@ -2137,12 +2185,20 @@ elif section == "📊 S&P Breadth":
                         else:
                             wow200, wow50 = 0.0, 0.0
 
+                        # ATH proximity from pre-computed data
+                        ath_pct_val = None
+                        if not ath_df.empty and "sector" in ath_df.columns:
+                            ath_row = ath_df[ath_df["sector"] == sname]
+                            if not ath_row.empty:
+                                ath_pct_val = ath_row.iloc[0].get("near_ath_pct")
+                        ath_str = f"{float(ath_pct_val):.1f}%" if ath_pct_val is not None else "—"
+
                         sec_metric_rows.append({
                             "Sector": f"{sname} ({etf})" if etf else sname,
-                            "%>50SMA": f"{p50:.1f}%",
-                            "%>200SMA": f"{p200:.1f}%",
-                            "WoW 200": f"{wow200:+.1f}pp",
-                            "ATH note": "Requires yfinance — coming soon",
+                            "%>50SMA":    f"{p50:.1f}%",
+                            "%>200SMA":   f"{p200:.1f}%",
+                            "WoW 200":    f"{wow200:+.1f}pp",
+                            "Near ATH":   ath_str,
                         })
                     st.dataframe(pd.DataFrame(sec_metric_rows), use_container_width=True, hide_index=True)
                 except Exception as e2:

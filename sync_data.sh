@@ -20,6 +20,12 @@ cp $WORKSPACE/canslim-sepa/output/pattern_results.csv $HUB/data/canslim/ 2>/dev/
 cp $WORKSPACE/canslim-sepa/output/backtest_results.json $HUB/data/canslim/ 2>/dev/null && echo "✓ canslim backtest" || echo "✗ canslim backtest (not found)"
 cp $WORKSPACE/sp500-breadth/data/breadth_index_weekly_with_wow.csv $HUB/data/breadth/ 2>/dev/null && echo "✓ breadth_index" || echo "✗ breadth_index (not found)"
 cp $WORKSPACE/sp500-breadth/data/breadth_sector_weekly.csv $HUB/data/breadth/ 2>/dev/null && echo "✓ breadth_sector" || echo "✗ breadth_sector (not found)"
+# Compute ATH proximity (uses prices.parquet from sp500-breadth)
+if [ -f "$WORKSPACE/sp500-breadth/data/prices.parquet" ]; then
+  /Users/erikgustafsson/.openclaw/workspace/projects/intermarket-ratio-ml/.venv/bin/python3 $HUB/compute_ath_proximity.py && echo "✓ breadth_ath" || echo "✗ breadth_ath (compute failed)"
+else
+  echo "✗ breadth_ath (prices.parquet not found)"
+fi
 cp $WORKSPACE/market-risk-factors/data/latest_scores.json $HUB/data/risk_factors/ 2>/dev/null && echo "✓ risk_factors json" || echo "✗ risk_factors json (not found)"
 cp $WORKSPACE/market-risk-factors/data/composite_timeseries.parquet $HUB/data/risk_factors/ 2>/dev/null && echo "✓ risk_factors parquet" || echo "✗ risk_factors parquet (not found)"
 cp $WORKSPACE/crypto-analyzer/data/history.parquet $HUB/data/crypto/ 2>/dev/null && echo "✓ crypto" || echo "✗ crypto (not found)"
