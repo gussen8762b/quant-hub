@@ -260,6 +260,7 @@ def load_smart_money_db() -> pd.DataFrame:
         query = """
             SELECT
                 c.ticker,
+                c.name as company_name,
                 it.owner_name as insider_name,
                 it.owner_role as role_title,
                 it.shares,
@@ -267,9 +268,11 @@ def load_smart_money_db() -> pd.DataFrame:
                 it.transaction_date,
                 it.price_per_share,
                 it.security_title,
-                COALESCE(it.conviction_score, it.role_weight * 20) as conviction_score
+                it.role_weight,
+                COALESCE(cs.total_score, it.role_weight * 1.0) as conviction_score
             FROM insider_transactions it
             JOIN companies c ON it.company_id = c.id
+            LEFT JOIN conviction_scores cs ON cs.ticker = c.ticker
             WHERE it.transaction_code = 'P'
             ORDER BY conviction_score DESC, it.transaction_date DESC
             LIMIT 200
@@ -2234,9 +2237,10 @@ elif section == "⚠️ Risk Factors":
                     v50 = float(last_row["composite_50"])
 
                     def _score_label_risk(v):
-                        if v >= 0.3:  return f"🟢 Low Risk ({v:+.2f})"
-                        if v >= -0.3: return f"🟡 Neutral ({v:+.2f})"
-                        return f"🔴 High Risk ({v:+.2f})"
+                        # Scale is 0–10: ≥7 = low risk, 4–7 = elevated, <4 = high risk
+                        if v >= 7:   return f"🟢 Low Risk ({v:.1f}/10)"
+                        if v >= 4:   return f"🟡 Elevated ({v:.1f}/10)"
+                        return f"🔴 High Risk ({v:.1f}/10)"
 
                     m1, m2 = st.columns(2)
                     m1.metric("20-Day Composite", _score_label_risk(v20))
@@ -2260,12 +2264,13 @@ elif section == "⚠️ Risk Factors":
                         hovertemplate="%{x|%Y-%m-%d}<br>50d: %{y:.3f}<extra></extra>",
                     ))
 
-                fig.add_hline(y=0,   line_dash="dash", line_color=C_GREY, opacity=0.6)
-                fig.add_hline(y=0.3, line_dash="dot",  line_color=C_GREEN, opacity=0.5,
-                              annotation_text="Low Risk", annotation_font_color=C_GREEN,
+                fig.add_hline(y=5,   line_dash="dash", line_color=C_GREY, opacity=0.6,
+                              annotation_text="Neutral (5.0)", annotation_font_color=C_GREY)
+                fig.add_hline(y=7.0, line_dash="dot",  line_color=C_GREEN, opacity=0.5,
+                              annotation_text="Low Risk (7+)", annotation_font_color=C_GREEN,
                               annotation_position="top right")
-                fig.add_hline(y=-0.3, line_dash="dot", line_color=C_RED, opacity=0.5,
-                              annotation_text="High Risk", annotation_font_color=C_RED,
+                fig.add_hline(y=4.0, line_dash="dot", line_color=C_RED, opacity=0.5,
+                              annotation_text="High Risk (<4)", annotation_font_color=C_RED,
                               annotation_position="bottom right")
 
                 # Range selector with longer history
@@ -2278,7 +2283,7 @@ elif section == "⚠️ Risk Factors":
                 fig.update_layout(
                     **PLOTLY_BASE, height=500,
                     xaxis=dict(rangeselector=rs_risk, rangeslider=dict(visible=False)),
-                    yaxis=dict(title="Composite Score (−1 to +1)", range=[-1.2,1.2]),
+                    yaxis=dict(title="Composite Risk Score (0–10, higher = lower risk)", range=[0, 10.5]),
                 )
                 st.plotly_chart(fig, use_container_width=True)
         except Exception as e:
