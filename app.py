@@ -172,6 +172,22 @@ def load_canslim_rankings() -> pd.DataFrame:
 
 
 @st.cache_data(ttl=3600)
+def load_canslim_full() -> pd.DataFrame:
+    """Full CAN SLIM screening universe (164 rows, all tiers B/A/C)."""
+    p = DATA_ROOT / "canslim" / "screening_results.csv"
+    if not p.exists():
+        return pd.DataFrame()
+    try:
+        df = pd.read_csv(p)
+        for col in ["trend_template_pass", "squeeze_fired"]:
+            if col in df.columns:
+                df[col] = df[col].astype(bool)
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=3600)
 def load_canslim_patterns() -> pd.DataFrame:
     p = DATA_ROOT / "canslim" / "pattern_results.csv"
     if not p.exists():
@@ -288,6 +304,45 @@ def load_smart_money_db() -> pd.DataFrame:
             LEFT JOIN conviction_scores cs ON cs.ticker = c.ticker
             WHERE it.transaction_code = 'P'
             ORDER BY conviction_score DESC, it.transaction_date DESC
+            LIMIT 200
+        """
+        df = pd.read_sql_query(query, conn)
+        conn.close()
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=3600)
+def load_smart_money_13f() -> pd.DataFrame:
+    """Load 13F fund holdings from smartmoney.db."""
+    import sqlite3
+    db_path = DATA_ROOT / "smart_money" / "smartmoney.db"
+    if not db_path.exists():
+        return pd.DataFrame()
+    try:
+        conn = sqlite3.connect(str(db_path))
+        # Check if fund_holdings table exists
+        tables = pd.read_sql_query(
+            "SELECT name FROM sqlite_master WHERE type='table'", conn
+        )["name"].tolist()
+        if "fund_holdings" not in tables:
+            conn.close()
+            return pd.DataFrame()
+        query = """
+            SELECT
+                f.fund_name,
+                c.ticker,
+                c.name as company_name,
+                fh.shares,
+                fh.market_value,
+                fh.pct_portfolio,
+                fh.report_date,
+                fh.change_type
+            FROM fund_holdings fh
+            JOIN funds f ON fh.fund_id = f.id
+            JOIN companies c ON fh.company_id = c.id
+            ORDER BY fh.market_value DESC
             LIMIT 200
         """
         df = pd.read_sql_query(query, conn)
@@ -538,28 +593,44 @@ elif section == "🤖 ML Signals":
                     .reset_index()
                 )
 
+                # Compute conviction score and sort cards by it
+                def _conviction(row):
+                    try:
+                        vc = float(row.get("vote_count", 0) or 0)
+                        nm = float(row.get("n_models", 5) or 5)
+                        ep = float(row.get("ensemble_pred", 0) or 0)
+                        return (vc / nm * 0.6) + (abs(ep) * 0.4)
+                    except Exception:
+                        return 0.0
+
+                if not latest.empty:
+                    latest["_conviction"] = latest.apply(_conviction, axis=1)
+                    if "ensemble_pred" in latest.columns:
+                        latest["_abs_ens"] = latest["ensemble_pred"].apply(lambda v: abs(float(v)) if pd.notna(v) else 0)
+                    else:
+                        latest["_abs_ens"] = 0
+                    latest = latest.sort_values(["_conviction", "_abs_ens"], ascending=False)
+
+                # Build ordered list of (asset, horizon) pairs for card layout
+                card_order = [(row["asset"], row["horizon"]) for _, row in latest.iterrows()]
+
+                # Group cards by asset for display (preserving conviction sort within each asset)
                 for asset in ASSETS:
                     label   = ASSET_LABELS.get(asset, asset)
                     subtext = ASSET_SUBTEXT.get(asset, asset)
                     st.markdown(f"### {label} <span style='color:{C_GREY};font-size:0.8rem'>({subtext})</span>", unsafe_allow_html=True)
 
+                    # Sort this asset's horizons by conviction
+                    asset_rows = latest[latest["asset"] == asset]
+
                     hz_cols = st.columns(3)
-                    for col_idx, (hz_key, hz_day, hz_label) in enumerate(HORIZONS):
-                        row_mask = (latest["asset"] == asset) & (latest["horizon"] == hz_key)
-                        row_data = latest[row_mask]
-
+                    for col_idx, (_, row_data_s) in enumerate(asset_rows.iterrows()):
+                        if col_idx >= 3:
+                            break
                         with hz_cols[col_idx]:
-                            if row_data.empty:
-                                st.markdown(
-                                    f"<div style='background:{C_CARD};border-radius:8px;padding:12px;"
-                                    f"border:1px solid #2d3748;'>"
-                                    f"<div style='color:{C_GREY};font-size:0.8rem;'>{hz_label}</div>"
-                                    f"<div style='color:{C_GREY};'>No data</div></div>",
-                                    unsafe_allow_html=True,
-                                )
-                                continue
-
-                            r = row_data.iloc[0]
+                            r = row_data_s
+                            hz_key   = r.get("horizon", "")
+                            hz_label = HORIZON_LABEL.get(hz_key, hz_key)
                             ens_dir  = str(r.get("ensemble_direction", "NEUTRAL")).upper()
                             conf_lvl = str(r.get("confidence_level", "LOW")).upper()
                             votes    = r.get("vote_count", "?")
@@ -567,6 +638,7 @@ elif section == "🤖 ML Signals":
                             sig_date = r.get("date", "—")
                             if hasattr(sig_date, "strftime"):
                                 sig_date = sig_date.strftime("%Y-%m-%d")
+                            conv_val = r.get("_conviction", 0)
 
                             dir_col  = DIRECTION_COLOR.get(ens_dir, C_GREY)
 
@@ -588,10 +660,20 @@ elif section == "🤖 ML Signals":
                                 f"</div>"
                                 f"<div style='margin-bottom:6px;'>{_conf_badge(conf_lvl)}"
                                 f" &nbsp; <span style='color:{C_GREY};font-size:0.75rem;'>{votes}/{n_models} agree</span>"
+                                f" &nbsp; <span style='color:{C_GREY};font-size:0.7rem;'>conv: {conv_val:.2f}</span>"
                                 f"</div>"
                                 f"<div style='font-size:0.72rem;line-height:1.8;'>{preds_html}</div>"
                                 f"<div style='color:{C_GREY};font-size:0.7rem;margin-top:6px;'>📅 {sig_date}</div>"
                                 f"</div>",
+                                unsafe_allow_html=True,
+                            )
+                    # Fill remaining columns if fewer than 3 horizons
+                    for col_idx in range(len(asset_rows), 3):
+                        with hz_cols[col_idx]:
+                            st.markdown(
+                                f"<div style='background:{C_CARD};border-radius:8px;padding:12px;"
+                                f"border:1px solid #2d3748;'>"
+                                f"<div style='color:{C_GREY};'>No data</div></div>",
                                 unsafe_allow_html=True,
                             )
                     st.markdown("---")
@@ -711,6 +793,13 @@ elif section == "🤖 ML Signals":
                 if "date" in disp.columns:
                     disp["date"] = disp["date"].dt.strftime("%Y-%m-%d") if hasattr(disp["date"].iloc[0], "strftime") else disp["date"].astype(str).str[:10]
 
+                if "is_correct" in disp.columns:
+                    disp["is_correct"] = disp["is_correct"].apply(
+                        lambda v: "✅ Correct" if v == 1 or v == 1.0 or v == "1" or v == "1.0"
+                        else ("❌ Wrong" if v == 0 or v == 0.0 or v == "0" or v == "0.0"
+                        else "—")
+                    )
+
                 show_cols = [c for c in ["date","asset","horizon","model","direction","prediction","actual_return","is_correct","is_oos"] if c in disp.columns]
                 st.dataframe(disp[show_cols], use_container_width=True, hide_index=True, height=500)
                 st.caption(f"Showing {len(disp):,} rows (most recent first)")
@@ -764,17 +853,31 @@ elif section == "🤖 ML Signals":
                             ))
                             # Summary stats
                             pnl_s = mdl_df["pnl"]
+                            cum = mdl_df["cum_pnl"]
                             n = len(pnl_s)
                             total_ret = float(pnl_s.sum()) * 100
                             win_rate = float((pnl_s > 0).mean() * 100) if n > 0 else 0
                             sharpe = float(pnl_s.mean() / pnl_s.std() * math.sqrt(252)) if (n > 1 and pnl_s.std() > 0) else 0
+                            max_dd = float(((cum.cummax() - cum) / (cum.cummax() + 1e-9)).max() * 100) if n > 0 else 0
                             summary_rows.append({
                                 "Model": mdl,
                                 "N Signals": n,
                                 "Total Return %": round(total_ret, 2),
-                                "Win Rate %": round(win_rate, 1),
                                 "Sharpe": round(sharpe, 2),
+                                "Max Drawdown %": round(max_dd, 2),
+                                "Win Rate %": round(win_rate, 1),
                             })
+
+                        # Buy & Hold benchmark (per model's date range — use first model's dates)
+                        if models_avail:
+                            bh_df = sub[sub["model"] == models_avail[0]].sort_values("date").copy()
+                            bh_df["bh_cum"] = bh_df["actual_return"].cumsum()
+                            fig.add_trace(go.Scatter(
+                                x=bh_df["date"], y=bh_df["bh_cum"] * 100,
+                                mode="lines", name=f"Buy & Hold {sel_asset_pnl}",
+                                line=dict(color=C_GREY, dash="dash", width=1.5),
+                                hovertemplate=f"Buy & Hold<br>%{{x|%Y-%m-%d}}<br>Cum: %{{y:.1f}}%<extra></extra>",
+                            ))
 
                         rs_pnl = dict(buttons=[
                             dict(count=1, label="1M", step="month", stepmode="backward"),
@@ -819,7 +922,7 @@ elif section == "🤖 ML Signals":
                 st.info("No data.")
             else:
                 # Last signal detected per asset+horizon+model
-                st.markdown("### Last Signal Per Asset × Horizon")
+                st.markdown("### Signal Status by Asset & Horizon")
                 if "asset" in src_df.columns and "horizon" in src_df.columns:
                     grp_cols = ["asset", "horizon"]
                     if "model" in src_df.columns:
@@ -828,11 +931,14 @@ elif section == "🤖 ML Signals":
                     for _, row in last_signals.head(12).iterrows():
                         dt = row["date"]
                         dt_str = dt.strftime("%Y-%m-%d") if hasattr(dt, "strftime") else str(dt)[:10]
-                        direction = str(row.get("direction", row.get("ensemble_direction", "—")))
+                        direction_raw = str(row.get("direction", row.get("ensemble_direction", "—"))).upper()
+                        direction_disp = ("🟢 ON (LONG)" if direction_raw == "LONG"
+                                          else ("🔴 OFF (SHORT)" if direction_raw == "SHORT"
+                                          else direction_raw))
                         asset_label = ASSET_LABELS.get(row.get("asset",""), row.get("asset",""))
-                        mdl = row.get("model", "")
+                        mdl = row.get("model", "ensemble")
                         hz = HORIZON_LABEL.get(row.get("horizon",""), row.get("horizon",""))
-                        st.info(f"**{asset_label}** {hz} {f'[{mdl}]' if mdl else ''} — Last signal: {dt_str} — {direction}")
+                        st.info(f"{asset_label} {hz} — Model: {mdl} | Direction: {direction_disp} | Date: {dt_str}")
 
                 st.markdown("---")
 
@@ -890,6 +996,64 @@ elif section == "🤖 ML Signals":
                             if col in flip_df.columns:
                                 styled = styled.applymap(_color_flip, subset=[col])
                         st.dataframe(styled, use_container_width=True, hide_index=True)
+
+                st.markdown("---")
+                st.markdown("### Per-Model Signal Chart")
+                pc1, pc2 = st.columns(2)
+                with pc1:
+                    sel_asset_perf = st.selectbox("Asset", ASSETS, key="perf_asset")
+                with pc2:
+                    sel_model_perf = st.selectbox("Model", ["lgb","rf","ridge","xgb","tft"], key="perf_model")
+
+                try:
+                    hist_perf = load_signal_history()
+                    if not hist_perf.empty and "model" in hist_perf.columns:
+                        sub_perf = hist_perf[
+                            (hist_perf["asset"] == sel_asset_perf) &
+                            (hist_perf["model"] == sel_model_perf)
+                        ].sort_values("date").copy()
+
+                        if sub_perf.empty:
+                            st.info(f"No history for {sel_asset_perf} / {sel_model_perf}")
+                        else:
+                            sub_perf["price_proxy"] = sub_perf["actual_return"].cumsum() * 100
+                            dir_col_name = "direction" if "direction" in sub_perf.columns else "ensemble_direction"
+
+                            fig_perf = go.Figure()
+                            # Price proxy line
+                            fig_perf.add_trace(go.Scatter(
+                                x=sub_perf["date"], y=sub_perf["price_proxy"],
+                                mode="lines", name="Cumulative Return (price proxy)",
+                                line=dict(color=C_BLUE, width=2),
+                                hovertemplate="%{x|%Y-%m-%d}<br>Cum: %{y:.1f}%<extra></extra>",
+                            ))
+                            # Background shading for LONG/SHORT
+                            if dir_col_name in sub_perf.columns:
+                                sub_perf["_dir"] = sub_perf[dir_col_name].str.upper()
+                                for i in range(len(sub_perf) - 1):
+                                    row_s = sub_perf.iloc[i]
+                                    d = row_s["_dir"]
+                                    fill_col = "rgba(34,197,94,0.12)" if d == "LONG" else ("rgba(239,68,68,0.12)" if d == "SHORT" else "rgba(0,0,0,0)")
+                                    fig_perf.add_vrect(
+                                        x0=row_s["date"], x1=sub_perf.iloc[i+1]["date"],
+                                        fillcolor=fill_col, opacity=1, layer="below", line_width=0,
+                                    )
+                            rs_perf = dict(buttons=[
+                                dict(count=1, label="1Y", step="year",  stepmode="backward"),
+                                dict(count=3, label="3Y", step="year",  stepmode="backward"),
+                                dict(count=5, label="5Y", step="year",  stepmode="backward"),
+                                dict(step="all", label="All"),
+                            ])
+                            fig_perf.update_layout(
+                                **PLOTLY_BASE, height=450,
+                                title=f"{ASSET_LABELS.get(sel_asset_perf, sel_asset_perf)} — {sel_model_perf} signal history",
+                                xaxis=dict(rangeselector=rs_perf, rangeslider=dict(visible=False)),
+                                yaxis_title="Cumulative Return %",
+                            )
+                            st.plotly_chart(fig_perf, use_container_width=True)
+                            st.caption("🟢 Green background = LONG signal · 🔴 Red background = SHORT signal")
+                except Exception as e_perf:
+                    st.error(f"Signal chart error: {e_perf}")
         except Exception as e:
             st.error(f"Performance tab error: {e}")
 
@@ -970,11 +1134,12 @@ that historically lead or confirm equity and crypto market direction.
                     st.markdown("### Per-Model Directional Accuracy (Historical)")
                     st.markdown("Mean(is_correct) per model × asset from signal_history_full.csv")
 
-                    acc_df = (
-                        hist_df.groupby(["model", "asset"])["is_correct"]
-                        .mean()
-                        .reset_index()
-                    )
+                    with st.spinner("Computing model accuracy..."):
+                        acc_df = (
+                            hist_df.groupby(["model", "asset"])["is_correct"]
+                            .mean()
+                            .reset_index()
+                        )
                     acc_df["is_correct"] = (acc_df["is_correct"] * 100).round(1)
                     acc_df["asset_label"] = acc_df["asset"].map(ASSET_LABELS).fillna(acc_df["asset"])
 
@@ -1046,12 +1211,13 @@ that historically lead or confirm equity and crypto market direction.
                 st.markdown("Latest vote_count/n_models per asset × horizon. Darker green = higher consensus.")
 
                 try:
-                    latest = (
-                        meta_df.sort_values("date")
-                        .groupby(["asset","horizon"])
-                        .last()
-                        .reset_index()
-                    )
+                    with st.spinner("Loading ensemble data..."):
+                        latest = (
+                            meta_df.sort_values("date")
+                            .groupby(["asset","horizon"])
+                            .last()
+                            .reset_index()
+                        )
                 except Exception as e_grp:
                     st.error(f"Could not group data: {e_grp}")
                     latest = pd.DataFrame()
@@ -1180,12 +1346,14 @@ elif section == "📈 CAN SLIM":
     st.title("📈 CAN SLIM + SEPA/VCP Screener")
 
     try:
-        cs_df  = load_canslim_rankings()
-        pat_df = load_canslim_patterns()
+        cs_df      = load_canslim_rankings()
+        full_cs_df = load_canslim_full()
+        pat_df     = load_canslim_patterns()
     except Exception as e:
         st.error(f"Failed to load CAN SLIM data: {e}")
-        cs_df  = pd.DataFrame()
-        pat_df = pd.DataFrame()
+        cs_df      = pd.DataFrame()
+        full_cs_df = pd.DataFrame()
+        pat_df     = pd.DataFrame()
 
     tabs = st.tabs([
         "🏆 Top Setups",
@@ -1220,12 +1388,16 @@ elif section == "📈 CAN SLIM":
                 if "composite_score" in filtered.columns:
                     filtered = filtered.sort_values("composite_score", ascending=False)
 
-                st.markdown(f"**{len(filtered)} stocks** matching filters (score ≥ 80)")
+                today_str = datetime.now().strftime("%Y-%m-%d")
+                st.success(f"✅ Screened today ({today_str}): {len(filtered)} setups")
 
                 display_cols = ["ticker","tier","composite_score","best_pattern","rs_rating",
                                 "trend_template_pass","squeeze_fired","price","sector"]
                 show_cols = [c for c in display_cols if c in filtered.columns]
                 disp = filtered[show_cols].copy().reset_index(drop=True)
+                # Add derived columns
+                disp["🔥 Active"] = disp["squeeze_fired"].apply(lambda v: "🔥 Active" if bool(v) else "") if "squeeze_fired" in disp.columns else ""
+                disp["📅 Screened"] = today_str
                 disp = disp.rename(columns={
                     "ticker": "Ticker", "tier": "Tier", "composite_score": "Score",
                     "best_pattern": "Pattern", "rs_rating": "RS",
@@ -1273,16 +1445,31 @@ elif section == "📈 CAN SLIM":
     # ── Tab 2: Analytics ──────────────────────────────────────────────────
     with tabs[1]:
         try:
-            if cs_df.empty:
+            analytics_src = full_cs_df if not full_cs_df.empty else cs_df
+            if analytics_src.empty:
                 st.info("No data.")
             else:
+                # Tier selector
+                tier_opts_analytics = ["A+","A","B","C","D"]
+                sel_tiers_analytics = st.multiselect(
+                    "Show tiers", tier_opts_analytics,
+                    default=tier_opts_analytics,
+                    key="analytics_tiers"
+                )
+                if sel_tiers_analytics and "tier" in analytics_src.columns:
+                    filtered_full = analytics_src[analytics_src["tier"].isin(sel_tiers_analytics)].copy()
+                else:
+                    filtered_full = analytics_src.copy()
+
+                st.caption(f"Showing {len(filtered_full)} stocks from full universe ({len(analytics_src)} total)")
+
                 c1, c2 = st.columns(2)
 
                 # Tier distribution
                 with c1:
                     st.markdown("#### Tier Distribution")
-                    if "tier" in cs_df.columns:
-                        tier_counts = cs_df["tier"].value_counts().reindex(["A+","A","B","C","D"]).fillna(0).reset_index()
+                    if "tier" in filtered_full.columns:
+                        tier_counts = filtered_full["tier"].value_counts().reindex(["A+","A","B","C","D"]).fillna(0).reset_index()
                         tier_counts.columns = ["Tier","Count"]
                         tier_counts["color"] = tier_counts["Tier"].map(TIER_COLOR_MAP).fillna(C_GREY)
                         fig = go.Figure(go.Bar(
@@ -1298,36 +1485,52 @@ elif section == "📈 CAN SLIM":
                 # Score distribution
                 with c2:
                     st.markdown("#### Score Distribution")
-                    if "composite_score" in cs_df.columns:
-                        scores = cs_df["composite_score"].dropna()
-                        fig = go.Figure(go.Histogram(
-                            x=scores, nbinsx=20,
-                            marker_color=C_BLUE, opacity=0.8,
-                        ))
-                        fig.update_layout(**PLOTLY_BASE, height=300,
+                    if "composite_score" in filtered_full.columns:
+                        scores = filtered_full["composite_score"].dropna()
+                        # Color by tier
+                        fig = go.Figure()
+                        for tier_val in ["A+","A","B","C","D"]:
+                            if "tier" in filtered_full.columns:
+                                tier_scores = filtered_full[filtered_full["tier"] == tier_val]["composite_score"].dropna()
+                            else:
+                                tier_scores = scores
+                            if not tier_scores.empty:
+                                fig.add_trace(go.Histogram(
+                                    x=tier_scores, nbinsx=15, name=tier_val,
+                                    marker_color=TIER_COLOR_MAP.get(tier_val, C_GREY), opacity=0.75,
+                                ))
+                        fig.update_layout(**PLOTLY_BASE, height=300, barmode="overlay",
                                           xaxis_title="Composite Score", yaxis_title="Count")
                         st.plotly_chart(fig, use_container_width=True)
 
                 # Sector breakdown
                 st.markdown("#### Sector Breakdown")
-                if "sector" in cs_df.columns and "tier" in cs_df.columns:
-                    sec_counts = cs_df.groupby("sector").size().reset_index(name="Count").sort_values("Count", ascending=True)
-                    fig = go.Figure(go.Bar(
-                        y=sec_counts["sector"], x=sec_counts["Count"],
-                        orientation="h",
-                        marker_color=C_BLUE,
-                        text=sec_counts["Count"],
-                        textposition="outside",
-                    ))
-                    fig.update_layout(**PLOTLY_BASE, height=max(300, len(sec_counts)*28),
-                                      xaxis_title="# Stocks", yaxis_title="")
+                if "sector" in filtered_full.columns and "tier" in filtered_full.columns:
+                    sec_tier = filtered_full.groupby(["sector","tier"]).size().reset_index(name="Count")
+                    sec_order = sec_tier.groupby("sector")["Count"].sum().sort_values(ascending=True).index.tolist()
+                    fig = go.Figure()
+                    for tier_val in ["A+","A","B","C","D"]:
+                        td = sec_tier[sec_tier["tier"] == tier_val]
+                        if not td.empty:
+                            fig.add_trace(go.Bar(
+                                y=td["sector"], x=td["Count"],
+                                name=tier_val,
+                                orientation="h",
+                                marker_color=TIER_COLOR_MAP.get(tier_val, C_GREY),
+                                text=td["Count"],
+                                textposition="auto",
+                            ))
+                    fig.update_layout(**PLOTLY_BASE, height=max(300, len(sec_order)*28),
+                                      xaxis_title="# Stocks", yaxis_title="",
+                                      barmode="stack",
+                                      yaxis=dict(categoryorder="array", categoryarray=sec_order))
                     st.plotly_chart(fig, use_container_width=True)
 
                 # Score components by tier
                 st.markdown("#### Avg Score Components by Tier")
-                score_cols = [c for c in ["technical_score","fundamental_score","pattern_score","market_score"] if c in cs_df.columns]
-                if score_cols and "tier" in cs_df.columns:
-                    avg_by_tier = cs_df.groupby("tier")[score_cols].mean().reindex(["A+","A","B","C","D"]).dropna(how="all")
+                score_cols = [c for c in ["technical_score","fundamental_score","pattern_score","market_score"] if c in filtered_full.columns]
+                if score_cols and "tier" in filtered_full.columns:
+                    avg_by_tier = filtered_full.groupby("tier")[score_cols].mean().reindex(["A+","A","B","C","D"]).dropna(how="all")
                     fig = go.Figure()
                     colors = [C_BLUE, C_GREEN, C_YELLOW, "#a855f7"]
                     labels = {"technical_score":"Technical","fundamental_score":"Fundamental",
@@ -1342,6 +1545,27 @@ elif section == "📈 CAN SLIM":
                     fig.update_layout(**PLOTLY_BASE, height=350, barmode="group",
                                       xaxis_title="Tier", yaxis_title="Avg Score")
                     st.plotly_chart(fig, use_container_width=True)
+
+                # TradingView links per tier
+                if "ticker" in filtered_full.columns and "tier" in filtered_full.columns:
+                    st.markdown("#### TradingView Links by Tier")
+                    tier_link_parts = []
+                    for tier_val in ["A+","A","B","C"]:
+                        tier_tickers = filtered_full[filtered_full["tier"] == tier_val]["ticker"].dropna().tolist()[:20]
+                        if tier_tickers:
+                            links_str = " ".join([
+                                f'<a href="https://www.tradingview.com/chart/?symbol={t}" target="_blank" '
+                                f'style="color:{TIER_COLOR_MAP.get(tier_val, C_BLUE)};">{t}</a>'
+                                for t in tier_tickers
+                            ])
+                            tier_link_parts.append(f"<b style='color:{TIER_COLOR_MAP.get(tier_val, C_GREY)};'>{tier_val}:</b> {links_str}")
+                    if tier_link_parts:
+                        st.markdown(
+                            "<div style='font-size:0.8rem;line-height:2.2;'>" +
+                            " &nbsp;|&nbsp; ".join(tier_link_parts) +
+                            "</div>",
+                            unsafe_allow_html=True,
+                        )
         except Exception as e:
             st.error(f"Analytics tab error: {e}")
 
@@ -1471,18 +1695,30 @@ elif section == "📈 CAN SLIM":
                 m5.metric("Win Rate",      f"{bt.get('win_rate', 0):.1f}%")
                 m6.metric("# Trades",      str(bt.get("num_trades", 0)))
 
-                st.markdown("---")
-                a1, a2 = st.columns(2)
-                with a1:
-                    st.metric("Avg Return/Trade", f"{bt.get('avg_return', 0):+.2f}%")
-                    st.metric("Avg Win",  f"{bt.get('avg_win', 0):+.2f}%")
-                    st.metric("Avg Loss", f"{bt.get('avg_loss', 0):+.2f}%")
-                with a2:
-                    st.metric("Best Trade",  f"{bt.get('best_trade', 0):+.2f}%")
-                    st.metric("Worst Trade", f"{bt.get('worst_trade', 0):+.2f}%")
-                    st.metric("Alpha",       f"{alpha:+.2f}%")
-
                 trades = bt.get("trades")
+                # Compute median return from trades list
+                median_ret = 0.0
+                if trades:
+                    trades_df_tmp = pd.DataFrame(trades)
+                    if "return_pct" in trades_df_tmp.columns:
+                        median_ret = float(trades_df_tmp["return_pct"].median())
+
+                stat_df = pd.DataFrame({
+                    "Metric": ["Avg Return/Trade", "Median Return/Trade", "Best Trade", "Worst Trade", "Avg Win", "Avg Loss", "Alpha vs SPY"],
+                    "Value": [
+                        f"{bt.get('avg_return', 0):+.2f}%",
+                        f"{median_ret:+.2f}%",
+                        f"{bt.get('best_trade', 0):+.2f}%",
+                        f"{bt.get('worst_trade', 0):+.2f}%",
+                        f"{bt.get('avg_win', 0):+.2f}%",
+                        f"{bt.get('avg_loss', 0):+.2f}%",
+                        f"{alpha:+.2f}%",
+                    ],
+                })
+                st.dataframe(stat_df, use_container_width=True, hide_index=True)
+
+                st.markdown("---")
+
                 if trades:
                     st.markdown("---")
                     trades_df = pd.DataFrame(trades)
@@ -1762,19 +1998,37 @@ elif section == "🪙 Crypto":
             else:
                 run_dates = sorted(cr_df["run_date"].dropna().unique()) if "run_date" in cr_df.columns else []
                 if len(run_dates) < 2:
+                    n_dates = len(run_dates)
                     d = run_dates[0] if run_dates else "?"
-                    st.info(f"Only 1 run date ({str(d)[:10]}). Showing full table. Run analyzer again to build trend history.")
+                    if n_dates <= 3:
+                        st.info(f"{n_dates} daily snapshot(s) available — growing daily as analyzer runs. Showing full table.")
+                    else:
+                        st.info(f"Only {n_dates} run date(s) ({str(d)[:10]}). Run analyzer again to build trend history.")
                     st.dataframe(cr_latest, use_container_width=True, height=500)
                 else:
                     hist = cr_df.copy()
                     if "Symbol" in hist.columns:
                         hist["sym_clean"] = hist["Symbol"].apply(_clean_sym)
 
+                    # Show note when history is short (just started tracking)
+                    if len(run_dates) <= 5:
+                        st.info(f"📅 {len(run_dates)} daily snapshots ({str(run_dates[0])[:10]} → {str(run_dates[-1])[:10]}) — growing daily as analyzer runs. Score changes reflect composite score evolution over time.")
+
+                    # Date range selector
+                    min_d = pd.to_datetime(min(run_dates))
+                    max_d = pd.to_datetime(max(run_dates))
+                    start_d = st.date_input(
+                        "From", value=min_d.date(),
+                        min_value=min_d.date(), max_value=max_d.date(),
+                        key="crypto_hist_start"
+                    )
+                    filtered_hist = hist[pd.to_datetime(hist["run_date"]) >= pd.Timestamp(start_d)]
+
                     # Top 10 by latest composite
                     top10 = cr_latest.sort_values("Composite", ascending=False)["sym_clean"].head(10).tolist() if "sym_clean" in cr_latest.columns else []
                     sel = st.multiselect("Filter assets", sorted(hist["sym_clean"].unique()) if "sym_clean" in hist.columns else [], default=top10)
 
-                    plot_hist = hist[hist["sym_clean"].isin(sel)] if sel and "sym_clean" in hist.columns else hist
+                    plot_hist = filtered_hist[filtered_hist["sym_clean"].isin(sel)] if sel and "sym_clean" in filtered_hist.columns else filtered_hist
                     if "Composite" in plot_hist.columns:
                         fig = px.line(
                             plot_hist.sort_values("run_date"),
@@ -1784,6 +2038,36 @@ elif section == "🪙 Crypto":
                         )
                         fig.update_layout(**PLOTLY_BASE, height=500, yaxis=dict(range=[0,100]))
                         st.plotly_chart(fig, use_container_width=True)
+
+                    # Trend direction arrows: compare first vs last run for each symbol
+                    if "sym_clean" in filtered_hist.columns and "Composite" in filtered_hist.columns:
+                        st.markdown("#### Trend Direction (first → last in selected range)")
+                        trend_rows = []
+                        for sym_val, grp in filtered_hist.groupby("sym_clean"):
+                            grp_sorted = grp.sort_values("run_date")
+                            if len(grp_sorted) >= 2:
+                                first_score = float(grp_sorted.iloc[0]["Composite"]) if pd.notna(grp_sorted.iloc[0]["Composite"]) else 0
+                                last_score  = float(grp_sorted.iloc[-1]["Composite"]) if pd.notna(grp_sorted.iloc[-1]["Composite"]) else 0
+                                delta = last_score - first_score
+                                if delta > 2:
+                                    arrow = "↑"
+                                    arrow_color = C_GREEN
+                                elif delta < -2:
+                                    arrow = "↓"
+                                    arrow_color = C_RED
+                                else:
+                                    arrow = "→"
+                                    arrow_color = C_GREY
+                                trend_rows.append({
+                                    "Symbol": sym_val,
+                                    "First": round(first_score, 1),
+                                    "Last": round(last_score, 1),
+                                    "Change": f"{delta:+.1f}",
+                                    "Trend": arrow,
+                                })
+                        if trend_rows:
+                            trend_df = pd.DataFrame(trend_rows).sort_values("Last", ascending=False)
+                            st.dataframe(trend_df, use_container_width=True, hide_index=True)
         except Exception as e:
             st.error(f"History tab error: {e}")
 
@@ -2013,7 +2297,11 @@ elif section == "📊 S&P Breadth":
                             "Trend":      trend,
                         })
 
-                    sec_tbl = pd.DataFrame(sector_rows)
+                    sec_tbl = pd.DataFrame(sector_rows).sort_values(
+                        "%>200SMA", ascending=False,
+                        key=lambda x: x.str.rstrip("%").astype(float),
+                        ignore_index=True
+                    )
                     st.dataframe(sec_tbl, use_container_width=True, hide_index=True)
 
                     # Leading / Lagging tiles
@@ -2097,7 +2385,41 @@ elif section == "📊 S&P Breadth":
             if idx_df.empty:
                 st.info("No breadth index data.")
             else:
-                metrics_ts = [c for c in ["above_50sma","above_200sma"] if c in idx_df.columns]
+                # Start date selector
+                ts_min_date = idx_df["date"].min().date()
+                ts_max_date = idx_df["date"].max().date()
+                ts_default  = max(ts_min_date, pd.Timestamp("2022-01-01").date())
+                start_date  = st.date_input(
+                    "Start date", value=ts_default,
+                    min_value=ts_min_date, max_value=ts_max_date,
+                    key="ts_start"
+                )
+
+                # Toggle checkboxes
+                cb1, cb2, cb3 = st.columns(3)
+                with cb1:
+                    show_50  = st.checkbox("% >50 SMA",  value=True, key="ts_50")
+                with cb2:
+                    show_200 = st.checkbox("% >200 SMA", value=True, key="ts_200")
+                with cb3:
+                    show_ath = st.checkbox("Near ATH (±3%)", value=True, key="ts_ath")
+
+                # Filter by start_date
+                idx_filtered = idx_df[idx_df["date"] >= pd.Timestamp(start_date)].copy()
+
+                metrics_ts = []
+                if show_50 and "above_50sma" in idx_filtered.columns:
+                    metrics_ts.append("above_50sma")
+                if show_200 and "above_200sma" in idx_filtered.columns:
+                    metrics_ts.append("above_200sma")
+
+                # Compute period returns for legend labels
+                def _period_ret(df, col):
+                    vals = df[col].dropna()
+                    if len(vals) >= 2:
+                        return float(vals.iloc[-1]) - float(vals.iloc[0])
+                    return 0.0
+
                 if metrics_ts:
                     fig = go.Figure()
                     colors_ts = {
@@ -2106,12 +2428,23 @@ elif section == "📊 S&P Breadth":
                     }
                     labels_ts = {"above_50sma":"% >50 SMA","above_200sma":"% >200 SMA"}
                     for m in metrics_ts:
+                        ret_pp = _period_ret(idx_filtered, m)
+                        label_with_ret = f"{labels_ts.get(m,m)} ({ret_pp:+.1f}pp since {start_date})"
                         fig.add_trace(go.Scatter(
-                            x=idx_df["date"], y=idx_df[m],
-                            mode="lines", name=labels_ts.get(m,m),
+                            x=idx_filtered["date"], y=idx_filtered[m],
+                            mode="lines", name=label_with_ret,
                             line=dict(color=colors_ts.get(m,C_BLUE)),
                             hovertemplate="%{x|%Y-%m-%d}<br>%{y:.1f}%<extra></extra>",
                         ))
+
+                    # Near ATH overlay (from ath_df if available)
+                    if show_ath and not ath_df.empty:
+                        ath_idx_row = ath_df[ath_df["sector"] == "S&P 500 (Index)"]
+                        if not ath_idx_row.empty:
+                            ath_idx_pct_val = float(ath_idx_row.iloc[0]["near_ath_pct"])
+                            ath_date_val    = str(ath_idx_row.iloc[0].get("date", ""))
+                            st.caption(f"Near ATH: {ath_idx_pct_val:.1f}% as of {ath_date_val} — time series tracking begins today")
+
                     fig.add_hline(y=70, line_dash="dot", line_color=C_GREEN, opacity=0.5, annotation_text="Bull threshold")
                     fig.add_hline(y=50, line_dash="dot", line_color=C_YELLOW, opacity=0.5, annotation_text="Neutral")
                     fig.add_hline(y=30, line_dash="dot", line_color=C_RED, opacity=0.5, annotation_text="Bear threshold")
@@ -2126,33 +2459,41 @@ elif section == "📊 S&P Breadth":
                         **PLOTLY_BASE, height=450,
                         xaxis=dict(
                             rangeselector=rs_breadth, rangeslider=dict(visible=False),
-                            range=["2022-01-01", idx_df["date"].max().strftime("%Y-%m-%d")],
+                            range=[str(start_date), idx_df["date"].max().strftime("%Y-%m-%d")],
                         ),
                         yaxis=dict(title="% of S&P 500", range=[0,105]),
                     )
                     st.plotly_chart(fig, use_container_width=True)
                 else:
-                    st.info("No SMA columns found.")
+                    st.info("No SMA columns found or all toggles disabled.")
 
                 # Sector Breadth — % above 200 SMA sub-section
                 if not sec_df.empty and "above_200sma" in sec_df.columns:
                     st.markdown("---")
                     st.subheader("Sector Breadth — % above 200 SMA")
                     try:
-                        sec_pivot = sec_df.pivot_table(index="date", columns="sector", values="above_200sma", aggfunc="last")
+                        # Filter sector data by start_date
+                        sec_filtered = sec_df[sec_df["date"] >= pd.Timestamp(start_date)].copy()
+                        sec_pivot = sec_filtered.pivot_table(index="date", columns="sector", values="above_200sma", aggfunc="last")
                         sec_pivot = sec_pivot.sort_index()
                         fig2 = go.Figure()
                         for col in sec_pivot.columns:
+                            col_vals = sec_pivot[col].dropna()
+                            if len(col_vals) >= 2:
+                                sec_ret_pp = float(col_vals.iloc[-1]) - float(col_vals.iloc[0])
+                                sec_label = f"{col} ({sec_ret_pp:+.1f}pp)"
+                            else:
+                                sec_label = col
                             fig2.add_trace(go.Scatter(
                                 x=sec_pivot.index, y=sec_pivot[col],
-                                mode="lines", name=col,
+                                mode="lines", name=sec_label,
                                 hovertemplate=f"{col}<br>%{{x|%Y-%m-%d}}<br>%{{y:.1f}}%<extra></extra>",
                             ))
                         fig2.update_layout(
                             **PLOTLY_BASE, height=450,
                             xaxis=dict(
                                 rangeselector=rs_breadth, rangeslider=dict(visible=False),
-                                range=["2022-01-01", sec_df["date"].max().strftime("%Y-%m-%d")],
+                                range=[str(start_date), sec_df["date"].max().strftime("%Y-%m-%d")],
                             ),
                             yaxis=dict(title="% above 200 SMA", range=[0,105]),
                         )
@@ -2370,54 +2711,48 @@ elif section == "⚠️ Risk Factors":
                         "3M (derived)": sig_3m,
                     })
 
-                # Build Plotly table with colored cells
-                factor_col = [r["Factor"] for r in rows]
-                val_col    = [r["Value"] for r in rows]
-                curr_col   = [f"{SIGNAL_EMOJI_RISK[r['Current/1W']]} {SIGNAL_LABELS_RISK[r['Current/1W']]}" for r in rows]
-                m50_col    = [f"{SIGNAL_EMOJI_RISK[r['50-Day/1M']]} {SIGNAL_LABELS_RISK[r['50-Day/1M']]}" for r in rows]
-                m3_col     = [f"{SIGNAL_EMOJI_RISK[r['3M (derived)']]} {SIGNAL_LABELS_RISK[r['3M (derived)']]}" for r in rows]
-
                 CELL_BG = {"green":"#052e16","yellow":"#1c1400","red":"#1c0505","na":"#1a1f2e"}
                 CELL_FG = {"green":C_GREEN,"yellow":C_YELLOW,"red":C_RED,"na":C_GREY}
 
-                fig = go.Figure(data=[go.Table(
-                    columnwidth=[200,120,130,130,130],
-                    header=dict(
-                        values=["<b>Factor</b>","<b>Value</b>","<b>Current/1W</b>","<b>50-Day/1M</b>","<b>3M</b>"],
-                        fill_color="#1e3a5f",
-                        font=dict(color="white",size=12),
-                        align=["left","center","center","center","center"],
-                        height=36,
-                    ),
-                    cells=dict(
-                        values=[factor_col, val_col, curr_col, m50_col, m3_col],
-                        fill_color=[
-                            [C_CARD]*len(rows),
-                            [C_CARD]*len(rows),
-                            [CELL_BG[r["Current/1W"]] for r in rows],
-                            [CELL_BG[r["50-Day/1M"]] for r in rows],
-                            [CELL_BG[r["3M (derived)"]] for r in rows],
-                        ],
-                        font=dict(
-                            color=[
-                                ["#e2e8f0"]*len(rows),
-                                ["#94a3b8"]*len(rows),
-                                [CELL_FG[r["Current/1W"]] for r in rows],
-                                [CELL_FG[r["50-Day/1M"]] for r in rows],
-                                [CELL_FG[r["3M (derived)"]] for r in rows],
-                            ],
-                            size=11,
-                        ),
-                        align=["left","center","center","center","center"],
-                        height=32,
-                    ),
-                )])
-                fig.update_layout(
-                    **PLOTLY_BASE,
-                    height=max(500, len(rows)*34+80),
-                    margin=dict(l=0,r=0,t=10,b=10),
-                )
-                st.plotly_chart(fig, use_container_width=True)
+                # Build pure HTML table (avoids go.Table rendering issues in Streamlit)
+                html_rows = ""
+                for r in rows:
+                    def _td_signal(sig_key):
+                        bg  = CELL_BG.get(sig_key, "#1a1f2e")
+                        fg  = CELL_FG.get(sig_key, C_GREY)
+                        lbl = f"{SIGNAL_EMOJI_RISK.get(sig_key,'⚪')} {SIGNAL_LABELS_RISK.get(sig_key,'N/A')}"
+                        return (f"<td style='background:{bg};color:{fg};font-weight:700;"
+                                f"text-align:center;padding:6px 10px;font-size:0.82rem;'>{lbl}</td>")
+
+                    html_rows += (
+                        f"<tr>"
+                        f"<td style='color:#e2e8f0;padding:6px 10px;font-size:0.83rem;'>{r['Factor']}</td>"
+                        f"<td style='color:#94a3b8;text-align:center;padding:6px 10px;font-size:0.82rem;'>{r['Value']}</td>"
+                        f"{_td_signal(r['Current/1W'])}"
+                        f"{_td_signal(r['50-Day/1M'])}"
+                        f"{_td_signal(r['3M (derived)'])}"
+                        f"</tr>"
+                    )
+
+                html_table = f"""
+<div style="overflow-x:auto;">
+<table style="width:100%;border-collapse:collapse;background:{C_CARD};border-radius:8px;overflow:hidden;">
+  <thead>
+    <tr style="background:#1e3a5f;">
+      <th style="color:white;text-align:left;padding:8px 10px;font-size:0.85rem;">Factor</th>
+      <th style="color:white;text-align:center;padding:8px 10px;font-size:0.85rem;">Value</th>
+      <th style="color:white;text-align:center;padding:8px 10px;font-size:0.85rem;">Current / 1W</th>
+      <th style="color:white;text-align:center;padding:8px 10px;font-size:0.85rem;">50-Day / 1M</th>
+      <th style="color:white;text-align:center;padding:8px 10px;font-size:0.85rem;">3M (derived)</th>
+    </tr>
+  </thead>
+  <tbody>
+    {html_rows}
+  </tbody>
+</table>
+</div>
+"""
+                st.markdown(html_table, unsafe_allow_html=True)
         except Exception as e:
             st.error(f"Multi-horizon tab error: {e}")
 
@@ -2498,103 +2833,167 @@ elif section == "⚠️ Risk Factors":
 # ══════════════════════════════════════════════════════════════════════════════
 
 elif section == "💰 Smart Money":
-    st.title("💰 Smart Money — Insider Transactions")
+    st.title("💰 Smart Money — Insider Transactions & 13F Holdings")
     st.markdown("---")
 
     try:
-        sm_df = load_smart_money_db()
-        db_path = DATA_ROOT / "smart_money" / "smartmoney.db"
+        sm_df    = load_smart_money_db()
+        sm_13f   = load_smart_money_13f()
+        db_path  = DATA_ROOT / "smart_money" / "smartmoney.db"
         db_mtime = _file_mtime(db_path)
     except Exception as e:
-        sm_df = pd.DataFrame()
+        sm_df    = pd.DataFrame()
+        sm_13f   = pd.DataFrame()
         db_mtime = "—"
         st.error(f"Error loading Smart Money DB: {e}")
 
-    if sm_df.empty:
-        db_exists = (DATA_ROOT / "smart_money" / "smartmoney.db").exists()
-        if db_exists:
-            st.warning(
-                f"smartmoney.db exists (last updated: {db_mtime}) but contains no insider purchase transactions yet. "
-                f"Run: `cd projects/smart-money && python3 run_daily.py --form4-only --days 90 --limit 500`"
-            )
-        else:
-            st.markdown(
-                f"<div style='background:{C_CARD};border:1px solid {C_YELLOW}55;"
-                f"border-left:4px solid {C_YELLOW};border-radius:8px;padding:24px;'>"
-                f"<div style='color:{C_YELLOW};font-size:1.1em;font-weight:700;margin-bottom:8px;'>⏳ Insider pipeline not yet run</div>"
-                f"<div style='color:{C_GREY};'>Run: cd projects/smart-money && python3 run_daily.py --form4-only --days 90 --limit 500</div>"
-                f"<div style='color:{C_GREY};margin-top:6px;font-size:0.82rem;'>Last attempted: {db_mtime}</div>"
-                f"</div>",
-                unsafe_allow_html=True,
-            )
-    else:
-        st.caption(f"smartmoney.db — last updated: {db_mtime} · {len(sm_df):,} insider purchases")
+    sm_tabs = st.tabs(["🔍 Insider Buys", "🏦 13F Holdings"])
 
-        # Summary metrics
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Total Buys", len(sm_df))
-        if "ticker" in sm_df.columns:
-            m2.metric("Unique Tickers", sm_df["ticker"].nunique())
-        if "total_value" in sm_df.columns:
-            total_val = sm_df["total_value"].sum()
-            m3.metric("Total $ Value", f"${total_val/1e6:.1f}M" if total_val >= 1e6 else f"${total_val:,.0f}")
-        if "conviction_score" in sm_df.columns:
-            m4.metric("Avg Conviction", f"{sm_df['conviction_score'].mean():.1f}")
+    # ── Smart Money Tab 1: Insider Buys ───────────────────────────────────
+    with sm_tabs[0]:
+        try:
+            st.caption(f"smartmoney.db — last updated: {db_mtime}")
+            st.info("ℹ️ Note: Private companies (e.g. Figma) are not required to file Form 4 with the SEC. Only public company insider transactions appear here.")
 
-        st.markdown("---")
-        st.subheader("Top Insider Buys by Conviction")
+            if sm_df.empty:
+                db_exists = (DATA_ROOT / "smart_money" / "smartmoney.db").exists()
+                if db_exists:
+                    st.warning(
+                        f"smartmoney.db exists (last updated: {db_mtime}) but contains no insider purchase "
+                        f"transactions yet. Run: `cd projects/smart-money && python3 run_daily.py --form4-only --days 90 --limit 500`"
+                    )
+                else:
+                    st.markdown(
+                        f"<div style='background:{C_CARD};border:1px solid {C_YELLOW}55;"
+                        f"border-left:4px solid {C_YELLOW};border-radius:8px;padding:24px;'>"
+                        f"<div style='color:{C_YELLOW};font-size:1.1em;font-weight:700;margin-bottom:8px;'>⏳ Insider pipeline not yet run</div>"
+                        f"<div style='color:{C_GREY};'>Run: cd projects/smart-money && python3 run_daily.py --form4-only --days 90 --limit 500</div>"
+                        f"<div style='color:{C_GREY};margin-top:6px;font-size:0.82rem;'>Last attempted: {db_mtime}</div>"
+                        f"</div>",
+                        unsafe_allow_html=True,
+                    )
+            else:
+                # Summary metrics
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("Total Buys", len(sm_df))
+                if "ticker" in sm_df.columns:
+                    m2.metric("Unique Tickers", sm_df["ticker"].nunique())
+                if "total_value" in sm_df.columns:
+                    total_val = sm_df["total_value"].apply(lambda v: float(v) if pd.notna(v) else 0).sum()
+                    m3.metric("Total $ Value", f"${total_val/1e6:.1f}M" if total_val >= 1e6 else f"${total_val:,.0f}")
+                if "conviction_score" in sm_df.columns:
+                    m4.metric("Avg Conviction", f"{pd.to_numeric(sm_df['conviction_score'], errors='coerce').mean():.1f}")
 
-        # Format display
-        disp_sm = sm_df.copy()
-        if "total_value" in disp_sm.columns:
-            disp_sm["total_value"] = disp_sm["total_value"].apply(
-                lambda v: f"${v:,.0f}" if pd.notna(v) else "—"
-            )
-        if "price_per_share" in disp_sm.columns:
-            disp_sm["price_per_share"] = disp_sm["price_per_share"].apply(
-                lambda v: f"${v:.2f}" if pd.notna(v) else "—"
-            )
-        if "shares" in disp_sm.columns:
-            disp_sm["shares"] = disp_sm["shares"].apply(
-                lambda v: f"{int(v):,}" if pd.notna(v) else "—"
-            )
-        if "conviction_score" in disp_sm.columns:
-            disp_sm["conviction_score"] = disp_sm["conviction_score"].round(1)
+                st.markdown("---")
+                st.subheader("Top Insider Buys by Conviction")
 
-        display_cols_sm = [c for c in ["ticker","insider_name","role_title","shares","price_per_share",
-                                        "total_value","transaction_date","conviction_score"]
-                           if c in disp_sm.columns]
-        disp_sm = disp_sm[display_cols_sm].head(50)
-        disp_sm = disp_sm.rename(columns={
-            "ticker": "Ticker",
-            "insider_name": "Insider",
-            "role_title": "Role",
-            "shares": "Shares",
-            "price_per_share": "Price",
-            "total_value": "Total Value",
-            "transaction_date": "Date",
-            "conviction_score": "Conviction",
-        })
+                # Format display
+                disp_sm = sm_df.copy()
+                if "total_value" in disp_sm.columns:
+                    disp_sm["total_value"] = disp_sm["total_value"].apply(
+                        lambda v: f"${float(v):,.0f}" if pd.notna(v) else "—"
+                    )
+                if "price_per_share" in disp_sm.columns:
+                    disp_sm["price_per_share"] = disp_sm["price_per_share"].apply(
+                        lambda v: f"${float(v):.2f}" if pd.notna(v) else "—"
+                    )
+                if "shares" in disp_sm.columns:
+                    disp_sm["shares"] = disp_sm["shares"].apply(
+                        lambda v: f"{int(float(v)):,}" if pd.notna(v) else "—"
+                    )
+                if "conviction_score" in disp_sm.columns:
+                    disp_sm["conviction_score"] = pd.to_numeric(disp_sm["conviction_score"], errors="coerce").round(1)
 
-        def _conv_color(val):
-            try:
-                v = float(val)
-                if v >= 80: return f"color: {C_GREEN}; font-weight: bold"
-                if v >= 50: return f"color: {C_YELLOW}"
-                return f"color: {C_GREY}"
-            except Exception:
-                return ""
+                display_cols_sm = [c for c in ["ticker","insider_name","role_title","shares","price_per_share",
+                                                "total_value","transaction_date","conviction_score"]
+                                   if c in disp_sm.columns]
+                disp_sm = disp_sm[display_cols_sm].head(50)
+                disp_sm = disp_sm.rename(columns={
+                    "ticker": "Ticker",
+                    "insider_name": "Insider",
+                    "role_title": "Role",
+                    "shares": "Shares",
+                    "price_per_share": "Price",
+                    "total_value": "Total Value",
+                    "transaction_date": "Date",
+                    "conviction_score": "Conviction",
+                })
 
-        styled_sm = disp_sm.style
-        if "Conviction" in disp_sm.columns:
-            styled_sm = styled_sm.applymap(_conv_color, subset=["Conviction"])
-        st.dataframe(styled_sm, use_container_width=True, hide_index=True)
+                def _conv_color(val):
+                    try:
+                        v = float(val)
+                        if v >= 80: return f"color: {C_GREEN}; font-weight: bold"
+                        if v >= 50: return f"color: {C_YELLOW}"
+                        return f"color: {C_GREY}"
+                    except Exception:
+                        return ""
 
-    st.markdown("---")
-    st.markdown("""
-### Planned Enhancements
-- Institutional 13F filings (quarterly positions)
-- Dark pool flow signals
-- Options unusual activity
-- Smart money accumulation score per stock
+                styled_sm = disp_sm.style
+                if "Conviction" in disp_sm.columns:
+                    styled_sm = styled_sm.applymap(_conv_color, subset=["Conviction"])
+                st.dataframe(styled_sm, use_container_width=True, hide_index=True)
+        except Exception as e:
+            st.error(f"Insider Buys tab error: {e}")
+
+    # ── Smart Money Tab 2: 13F Holdings ───────────────────────────────────
+    with sm_tabs[1]:
+        try:
+            if sm_13f.empty:
+                st.info(
+                    "No 13F fund holdings data yet. "
+                    "Run: `cd projects/smart-money && python3 run_daily.py --13f-only` "
+                    "to fetch the latest institutional 13F filings."
+                )
+                st.markdown("""
+**What are 13F filings?**
+Institutional investment managers with >$100M AUM must file quarterly 13F reports with the SEC,
+disclosing all equity holdings. This provides a ~45-day lagged view of what major funds hold.
+
+**Coming when data is available:**
+- Fund name, position size, portfolio weight
+- New positions, additions, reductions, exits
+- Aggregated smart-money accumulation score per stock
 """)
+            else:
+                # Summary
+                n_funds = sm_13f["fund_name"].nunique() if "fund_name" in sm_13f.columns else 0
+                n_positions = len(sm_13f)
+                total_aum = sm_13f["market_value"].apply(lambda v: float(v) if pd.notna(v) else 0).sum() if "market_value" in sm_13f.columns else 0
+
+                m1, m2, m3 = st.columns(3)
+                m1.metric("Funds Tracked", n_funds)
+                m2.metric("Positions", n_positions)
+                m3.metric("Total AUM Tracked", f"${total_aum/1e9:.1f}B" if total_aum >= 1e9 else f"${total_aum/1e6:.0f}M")
+
+                st.markdown("---")
+                st.subheader("Top Holdings by Market Value")
+
+                disp_13f = sm_13f.copy()
+                if "market_value" in disp_13f.columns:
+                    disp_13f["market_value"] = disp_13f["market_value"].apply(
+                        lambda v: f"${float(v)/1e6:.1f}M" if pd.notna(v) and float(v) >= 1e6 else (f"${float(v):,.0f}" if pd.notna(v) else "—")
+                    )
+                if "pct_portfolio" in disp_13f.columns:
+                    disp_13f["pct_portfolio"] = disp_13f["pct_portfolio"].apply(
+                        lambda v: f"{float(v):.2f}%" if pd.notna(v) else "—"
+                    )
+                if "shares" in disp_13f.columns:
+                    disp_13f["shares"] = disp_13f["shares"].apply(
+                        lambda v: f"{int(float(v)):,}" if pd.notna(v) else "—"
+                    )
+                display_cols_13f = [c for c in ["fund_name","ticker","company_name","shares","market_value",
+                                                  "pct_portfolio","report_date","change_type"]
+                                    if c in disp_13f.columns]
+                disp_13f = disp_13f[display_cols_13f].rename(columns={
+                    "fund_name": "Fund",
+                    "ticker": "Ticker",
+                    "company_name": "Company",
+                    "shares": "Shares",
+                    "market_value": "Market Value",
+                    "pct_portfolio": "% Portfolio",
+                    "report_date": "Report Date",
+                    "change_type": "Change",
+                })
+                st.dataframe(disp_13f, use_container_width=True, hide_index=True)
+        except Exception as e:
+            st.error(f"13F Holdings tab error: {e}")

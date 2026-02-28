@@ -16,6 +16,7 @@ else
   echo "✗ signal_history_full.csv not found"
 fi
 cp $WORKSPACE/canslim-sepa/output/composite_rankings.csv $HUB/data/canslim/ 2>/dev/null && echo "✓ canslim rankings" || echo "✗ canslim rankings (not found)"
+cp $WORKSPACE/canslim-sepa/output/screening_results.csv $HUB/data/canslim/ 2>/dev/null && echo "✓ canslim screening (full universe)" || echo "✗ canslim screening (not found)"
 cp $WORKSPACE/canslim-sepa/output/pattern_results.csv $HUB/data/canslim/ 2>/dev/null && echo "✓ canslim patterns" || echo "✗ canslim patterns (not found)"
 cp $WORKSPACE/canslim-sepa/output/backtest_results.json $HUB/data/canslim/ 2>/dev/null && echo "✓ canslim backtest" || echo "✗ canslim backtest (not found)"
 cp $WORKSPACE/sp500-breadth/data/breadth_index_weekly_with_wow.csv $HUB/data/breadth/ 2>/dev/null && echo "✓ breadth_index" || echo "✗ breadth_index (not found)"
